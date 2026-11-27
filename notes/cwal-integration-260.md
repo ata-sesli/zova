@@ -284,7 +284,7 @@ can checkpoint a torn commit when it closes. These connections are:
 | `migrate` | Copy-forward, stores first and main last (`zova.zig:667-808`) | The lock connection is a CWAL writer handle, so no commit happens during the copy. Sources are read through CWAL readers or read-only connections. The output set is a new set: it keeps CWAL mode, with fresh markers and epoch 1. Leftover `-wal`/`-shm` handling in `migration_publication.zig:125-140` also covers the `-cwal-*` sidecars. Applies from the next format change; while format 15 is current, a CWAL source returns `NoMigrationPath` (phase 5). |
 | `bind` / `unbind` / `split` | `bind` writes store meta and main's row as separate autocommit statements (`zova.zig:2841-2848`) | `Misuse` on a CWAL handle (decision 10): disable CWAL, change the members, enable again. |
 | `validate`, `check --deep`, `doctor` | Read-only checks per schema | Also report CWAL state per member (marker, seqlock parity, broken flag, writer present), and run inside one `beginRead`. `doctor` reports a torn or broken set; it does not repair it. |
-| `salvage` | Read-only source, new destination | On a set that refuses to open, salvage opens members read-only one at a time and reports which members hold the newest marker. The destination is not CWAL. |
+| `salvage` | Read-only source, new destination | On a set that refuses to open, salvage opens every member read-only outside the protocol (no recovery, no checkpoint) and reports which members hold the newest marker. The destination is not CWAL. |
 | Fresh-build sessions | `beginImmediate` + commit | Commit through the CWAL path (§4). Usually main only, so single-file. |
 | `restore`, `convertSqliteToZova` | Write a new file | Output is not CWAL. |
 
@@ -785,7 +785,7 @@ authorizer layer are in place in `-Dexperimental-cwal` builds.
 
 **Phase 5 status (2026-11-27).** The maintenance operations of the Zig API
 are handled on a CWAL set in `-Dexperimental-cwal` builds. The CLI
-diagnostics and salvage rows are not done (below).
+diagnostics and salvage rows were finished later (below).
 
 - Operations, each with its test in `src/database_cwal_set_tests.zig`
   unless noted:
@@ -886,14 +886,34 @@ diagnostics and salvage rows are not done (below).
     the writer, null on a plain handle, `probeCommitProtocol`, and
     `markersTorn`. With the reader open disabled, the CLI test fails with
     `Busy`.
-- Not done:
-  - `extension list` / `info` and the extension-inspection fallback of
-    `check` and `doctor` still open read-write, so they get `Busy` beside
-    a live writer.
-  - `salvage` of a set that refuses to open (members one at a time,
-    reporting the newest marker).
-  - The `-cwal-*` sidecars in migration publication: no CWAL set is
-    migrated until the next format.
+- CLI extension inspection and refused-set salvage (after phase 6):
+  - `extension list` and `extension info` open a CWAL set as a reader
+    (`openInspectionDatabase`), so they run beside a live writer. The
+    extension-inspection fallback of `check` and `doctor` already opened
+    read-only. `extension check` still opens read-write, as it did.
+  - `salvage` of a set whose open returns `CommitSetNeedsRepair` reopens
+    it with `Database.openRefusedCwalSetForSalvageWithExtensions`
+    (experimental): every member read-only, outside the protocol, with no
+    recovery, no checkpoint on close (`SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE`)
+    and extensions in inspect mode. Each member is read as its file holds
+    it, so the copy can mix commits across members. The report gains a
+    `bound_store`-area issue `cwal_set_needs_repair` naming the members at
+    the newest marker and those behind or without one; `--dry-run` exits
+    4 and the copy runs, leaving the source files unchanged. The
+    destination is a plain set.
+  - Salvage read objects, loose chunks, vector ids and graphs through
+    unqualified private-table names, so with a bound store it read main's
+    empty tables and copied none of the store's data, on plain sets too.
+    The queries now use the store schema prefix, as the diagnostics do.
+  - Tests (`tests/cli.zig`): extension `list`, `info`, `doctor` and
+    `check --deep` beside an in-process writer, which commits afterwards;
+    salvage of a refused set (dry run, copy, unchanged source, rows and
+    vectors in the destination, `zova check` passes); salvage of a plain
+    set with bound object, vector and graph stores.
+- Not done: the `-cwal-*` sidecars in migration publication. While format
+  15 is current a CWAL source returns `NoMigrationPath` and no staged file
+  is a CWAL set, so the code would be untestable; it belongs to the next
+  format change.
 6. **C ABI and bindings.** §10, with ABI and format decisions approved
    first.
 

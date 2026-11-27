@@ -50,6 +50,70 @@ fn validateCommitProtocol(allocator: std.mem.Allocator, db: *zova.Database, repo
     }
 }
 
+/// For salvage of a CWAL set whose open was refused (`CommitSetNeedsRepair`)
+/// and that was opened outside the protocol: one issue naming the members
+/// that hold the newest commit marker, the members behind it, and members
+/// without a marker. It is a `bound_store` issue, a disagreement between
+/// the set's members, so salvage still copies what each member holds.
+pub fn addRefusedCwalSetIssue(allocator: std.mem.Allocator, db: *zova.Database, report: *DiagnosticReport) !void {
+    const schemas = [_][]const u8{ "main", "object_store", "vector_store", "graph_store" };
+    const present = [_]bool{ true, db.bound_object_store != null, db.bound_vector_store != null, db.bound_graph_store != null };
+    var markers: [schemas.len]?i64 = @splat(null);
+    var newest: ?i64 = null;
+    for (schemas, present, &markers) |schema, is_present, *marker| {
+        if (!is_present) continue;
+        marker.* = try memberMarkerTxn(allocator, db, schema);
+        if (marker.*) |txn| newest = @max(newest orelse txn, txn);
+    }
+
+    var detail: std.Io.Writer.Allocating = .init(allocator);
+    defer detail.deinit();
+    const writer = &detail.writer;
+    try writer.writeAll("the CWAL set refused to open because a torn cross-file commit cannot be rolled back safely; each member was read as its file holds it, outside the protocol");
+    if (newest) |txn| {
+        try writer.print("; newest commit marker {d}:", .{txn});
+        for (schemas, markers) |schema, marker| {
+            if (marker == txn) try writer.print(" {s}", .{schema});
+        }
+        var behind = false;
+        for (schemas, markers) |schema, marker| {
+            const member_txn = marker orelse continue;
+            if (member_txn == txn) continue;
+            try writer.writeAll(if (behind) ", " else "; behind:");
+            try writer.print(" {s} ({d})", .{ schema, member_txn });
+            behind = true;
+        }
+    }
+    var unmarked = false;
+    for (schemas, present, markers) |schema, is_present, marker| {
+        if (!is_present or marker != null) continue;
+        try writer.writeAll(if (unmarked) ", " else "; no marker:");
+        try writer.print(" {s}", .{schema});
+        unmarked = true;
+    }
+
+    var issues: std.ArrayList(DiagnosticIssue) = .fromOwnedSlice(report.issues);
+    report.issues = &.{};
+    errdefer {
+        for (issues.items) |*issue| issue.deinit(allocator);
+        issues.deinit(allocator);
+    }
+    try addDiagnosticIssue(allocator, report, &issues, .bound_store, "cwal_set_needs_repair", detail.written(), null, null, null, null);
+    report.issues = try issues.toOwnedSlice(allocator);
+}
+
+/// Row 0 of a member's `_zova_cwal_marker`, or null without one.
+fn memberMarkerTxn(allocator: std.mem.Allocator, db: *zova.Database, schema: []const u8) !?i64 {
+    const sql = try std.fmt.allocPrintSentinel(allocator, "select txn from {s}._zova_cwal_marker where k = 0", .{schema}, 0);
+    defer allocator.free(sql);
+    var stmt = db.prepare(sql) catch return null;
+    defer stmt.deinit();
+    return switch (try stmt.step()) {
+        .row => stmt.columnInt64(0),
+        .done => null,
+    };
+}
+
 fn collectObjectStorageStats(allocator: std.mem.Allocator, db: *zova.Database, report: *DiagnosticReport) !void {
     const prefix = diagnosticObjectSchemaPrefix(db);
     const sql = try std.fmt.allocPrintSentinel(allocator,

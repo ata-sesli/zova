@@ -20,6 +20,7 @@ const extensionUsageMessage = @import("parse.zig").extensionUsageMessage;
 const isExtensionHealthError = @import("common.zig").isExtensionHealthError;
 const lowerHex32 = @import("common.zig").lowerHex32;
 const openDatabase = @import("common.zig").openDatabase;
+const openInspectionDatabase = @import("common.zig").openInspectionDatabase;
 const parseExtensionCommandArgs = @import("parse.zig").parseExtensionCommandArgs;
 const startsWithZovaPrefix = @import("common.zig").startsWithZovaPrefix;
 const usageErrorFormat = @import("render.zig").usageErrorFormat;
@@ -86,8 +87,11 @@ pub fn extensionCommand(
                 return extensionOpenErrorFormat(stderr, parsed.format, err);
             };
         }
-        const opened = openDatabase(ctx, path_z) catch |err| {
-            if ((parsed.action == .list or parsed.action == .info) and isExtensionHealthError(err)) {
+        // list and info only read: a CWAL set opens as a reader, beside the
+        // set's writer.
+        const inspects = parsed.action == .list or parsed.action == .info;
+        const opened = (if (inspects) openInspectionDatabase(ctx, path_z) else openDatabase(ctx, path_z)) catch |err| {
+            if (inspects and isExtensionHealthError(err)) {
                 break :open_db zova.Database.openForExtensionInspectionWithExtensions(path_z, .{}, ctx.registry) catch |inspect_err| {
                     return extensionOpenErrorFormat(stderr, parsed.format, inspect_err);
                 };

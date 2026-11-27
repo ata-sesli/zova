@@ -1147,13 +1147,43 @@ pub const Database = struct {
             if (!load_bound_stores) return error.UnsupportedZovaVersion;
             return openCwal(path, options, registry, extension_mode);
         }
+        return openPlain(path, options, load_bound_stores, registry, extension_mode, .detect);
+    }
 
+    /// Experimental: open a CWAL set whose open was refused with
+    /// `CommitSetNeedsRepair`, for salvage only. Every member is opened
+    /// read-only through plain SQLite, outside the protocol: no recovery,
+    /// no checkpoint, extension hooks not run (as
+    /// `openForExtensionInspection`). Each member is read as its file and
+    /// WAL hold it, so the members may disagree about the last cross-file
+    /// commit; read each member's `_zova_cwal_marker` to see which. Do not
+    /// open the set through CWAL in this process while the handle is open.
+    pub fn openRefusedCwalSetForSalvageWithExtensions(path: [:0]const u8, registry: ExtensionRegistry) Error!Database {
+        if (!cwal_set.available) return error.UnsupportedZovaVersion;
+        try registry.validate();
+        if (!isZovaPath(path)) return error.NotZovaPath;
+        try ensurePathExists(path);
+        return openPlain(path, .{ .read_only = true }, true, registry, .inspect, .salvage);
+    }
+
+    const PlainOpenMode = enum {
+        /// Refuse a CWAL set, or finish a stopped enable on a writer.
+        detect,
+        /// Read a refused CWAL set's members outside the protocol.
+        salvage,
+    };
+
+    fn openPlain(path: [:0]const u8, options: OpenOptions, load_bound_stores: bool, registry: ExtensionRegistry, extension_mode: ExtensionOpenMode, mode: PlainOpenMode) Error!Database {
         const flags: sqlite.OpenFlags = if (options.read_only) .read_only else .read_write;
         var raw = try sqlite.Database.openWithFlags(path, flags);
         var raw_open = true;
         errdefer if (raw_open) raw.deinit();
+        if (mode == .salvage) {
+            // A read-only connection never checkpoints; this makes sure.
+            _ = sqlite.c.sqlite3_db_config(raw.handle, sqlite.c.SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, @as(c_int, 1), @as(?*c_int, null));
+        }
         if (options.busy_timeout_ms != 0) try raw.setBusyTimeout(options.busy_timeout_ms);
-        if (cwal_set.available and load_bound_stores and try commit_protocol.sqliteFlagSet(&raw)) {
+        if (mode == .detect and cwal_set.available and load_bound_stores and try commit_protocol.sqliteFlagSet(&raw)) {
             // An enable committed the flag but stopped before checkpointing
             // it. A writer finishes it, then opens the set as CWAL; a reader
             // must not write, so the set needs a read-write open first.
@@ -1166,7 +1196,7 @@ pub const Database = struct {
             raw.deinit();
             return openCwal(path, options, registry, extension_mode);
         }
-        try commit_protocol.refuseSqliteFlag(&raw);
+        if (mode == .detect) try commit_protocol.refuseSqliteFlag(&raw);
 
         try enableForeignKeys(&raw);
         try validateZovaSchema(&raw);
@@ -1210,7 +1240,7 @@ pub const Database = struct {
             .bound_vector_store = bound_vector_store,
             .bound_graph_store = bound_graph_store,
             .extension_registry = registry,
-            .reopen = if (load_bound_stores) .{ .options = options, .extension_mode = extension_mode } else null,
+            .reopen = if (load_bound_stores and mode == .detect) .{ .options = options, .extension_mode = extension_mode } else null,
         };
     }
 

@@ -1820,6 +1820,76 @@ test "cli inspects a CWAL set as a reader beside its writer" {
     try expectCwalReport(closed_json.value.object, false);
 }
 
+test "cli inspects extensions of a CWAL set as a reader beside its writer" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "cwal-ext-main.zova");
+    var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const store_path = try testingDbPath(&store_buffer, tmp.sub_path[0..], "cwal-ext-vectors.zova");
+
+    // A WAL set with an installed extension the CLI cannot load, so check
+    // and doctor take their extension-inspection fallback.
+    try zova.createVectorStore(store_path);
+    {
+        var db = try zova.Database.create(main_path);
+        defer db.deinit();
+        try db.bindVectorStore(store_path);
+        _ = try db.setJournalMode(.wal);
+        try db.exec("create table t(x)");
+    }
+    {
+        var raw = try zova.sqlite.Database.open(main_path);
+        defer raw.deinit();
+        try raw.exec(
+            \\insert into _zova_extensions
+            \\  (name, version, storage_prefix, zova_abi_min, capabilities, required, installed_at_unix, manifest_json)
+            \\values ('test', '0.1.0', '_zova_ext_test_', '1.5.0', 'sql', 1, 0, '')
+        );
+        try raw.exec("create table _zova_ext_test_meta (key text primary key, value text not null)");
+    }
+
+    // The application's handle, the set's only writer, opened without
+    // running extension hooks.
+    var writer = try zova.Database.openForExtensionUpgradeWithExtensions(main_path, .{}, zova.bundledExtensionRegistry());
+    defer writer.deinit();
+    writer.setCommitProtocol(.cwal) catch |err| return if (err == error.UnsupportedZovaVersion) error.SkipZigTest else err;
+
+    var list = try runCli(&.{ "zova", "extension", "list", "--json", main_path });
+    defer list.deinit();
+    try expectCliCode(&list, 0);
+    var list_json = try parseJson(list.stdout);
+    defer list_json.deinit();
+    try expectJsonArrayLen(list_json.value.object, "extensions", 1);
+
+    var info = try runCli(&.{ "zova", "extension", "info", "--json", main_path, "test" });
+    defer info.deinit();
+    try expectCliCode(&info, 0);
+    var info_json = try parseJson(info.stdout);
+    defer info_json.deinit();
+    const extension_value = info_json.value.object.get("extension") orelse return error.MissingJsonField;
+    try expectJsonString(extension_value.object, "name", "test");
+
+    var doctor = try runCli(&.{ "zova", "doctor", "--json", main_path });
+    defer doctor.deinit();
+    try expectCliCode(&doctor, 4);
+    var doctor_json = try parseJson(doctor.stderr);
+    defer doctor_json.deinit();
+    try expectJsonObjectHasInt(doctor_json.value.object, "issue_counts", "extension");
+    try expectContains(doctor.stderr, "ExtensionUnavailable");
+
+    var check = try runCli(&.{ "zova", "check", "--json", "--deep", main_path });
+    defer check.deinit();
+    try expectCliCode(&check, 4);
+    var check_json = try parseJson(check.stderr);
+    defer check_json.deinit();
+    try expectJsonObjectHasInt(check_json.value.object, "issue_counts", "extension");
+    try expectContains(check.stderr, "ExtensionUnavailable");
+
+    // None of them took the writer role from the application.
+    try writer.exec("insert into t values (1)");
+}
+
 test "cli check and doctor on a plain set report no commit protocol" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1867,6 +1937,59 @@ test "cli doctor reports a CWAL set with a checkpointed torn commit and leaves i
     try expectJsonString(doctor_json.value.object, "error", "CommitSetNeedsRepair");
     try std.testing.expectEqual(main_before, try fileSha256(main_path));
     try std.testing.expectEqual(store_before, try fileSha256(store_path));
+}
+
+test "cli salvage reads a CWAL set that refuses to open and names the members at its newest marker" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "refused-main.zova");
+    var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const store_path = try testingDbPath(&store_buffer, tmp.sub_path[0..], "refused-vectors.zova");
+    var destination_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const destination_path = try testingDbPath(&destination_buffer, tmp.sub_path[0..], "refused-salvaged.zova");
+    try createCwalSet(main_path, store_path);
+
+    // A checkpointed torn commit, as in the doctor test: the open refuses.
+    {
+        var store = try zova.sqlite.Database.openWithFlags(store_path, .read_write);
+        defer store.deinit();
+        try store.exec("update _zova_cwal_marker set txn = txn - 1 where k = 0");
+    }
+    try std.testing.expectError(error.CommitSetNeedsRepair, zova.Database.open(main_path));
+    const main_before = try fileSha256(main_path);
+    const store_before = try fileSha256(store_path);
+
+    var dry_run = try runCli(&.{ "zova", "salvage", "--dry-run", "--json", main_path });
+    defer dry_run.deinit();
+    try expectCliCode(&dry_run, 4);
+    try expectContains(dry_run.stderr, "cwal_set_needs_repair");
+    try expectContains(dry_run.stderr, "newest commit marker ");
+    try expectContains(dry_run.stderr, ": main; behind: vector_store (");
+
+    var salvage = try runCli(&.{ "zova", "salvage", "--json", main_path, destination_path });
+    defer salvage.deinit();
+    try expectCliCode(&salvage, 0);
+    try expectContains(salvage.stdout, "cwal_set_needs_repair");
+
+    // The source is as it was, and the destination is a plain set with the
+    // rows and vectors each member held.
+    try std.testing.expectEqual(main_before, try fileSha256(main_path));
+    try std.testing.expectEqual(store_before, try fileSha256(store_path));
+    var salvaged = try zova.Database.open(destination_path);
+    defer salvaged.deinit();
+    try std.testing.expectEqual(zova.Database.CommitProtocol.none, salvaged.commitProtocol());
+    var rows = try salvaged.prepare("select count(*) from t");
+    defer rows.deinit();
+    try std.testing.expectEqual(zova.sqlite.Step.row, try rows.step());
+    try std.testing.expectEqual(@as(i64, 1), rows.columnInt64(0));
+    var docs = try salvaged.vectorCollectionInfo(std.testing.allocator, "docs");
+    defer docs.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u64, 1), docs.vector_count);
+
+    var check = try runCli(&.{ "zova", "check", destination_path });
+    defer check.deinit();
+    try expectCliCode(&check, 0);
 }
 
 test "cli doctor and check categorize bound object store marker failures" {
@@ -3546,6 +3669,55 @@ test "cli salvage copies healthy database into verified destination" {
         try std.testing.expect(try destination.hasGraph("app"));
         try std.testing.expect(try destination.hasGraphEdge("app", "message:1", "has_attachment", "attachment:1"));
     }
+}
+
+test "cli salvage copies data held in bound stores" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffers: [5][std.fs.max_path_bytes]u8 = undefined;
+    const source_path = try testingDbPath(&path_buffers[0], tmp.sub_path[0..], "salvage-bound-source.zova");
+    const object_store_path = try testingDbPath(&path_buffers[1], tmp.sub_path[0..], "salvage-bound-objects.zova");
+    const vector_store_path = try testingDbPath(&path_buffers[2], tmp.sub_path[0..], "salvage-bound-vectors.zova");
+    const graph_store_path = try testingDbPath(&path_buffers[3], tmp.sub_path[0..], "salvage-bound-graphs.zova");
+    const dest_path = try testingDbPath(&path_buffers[4], tmp.sub_path[0..], "salvage-bound-destination.zova");
+    try zova.createObjectStore(object_store_path);
+    try zova.createVectorStore(vector_store_path);
+    try zova.createGraphStore(graph_store_path);
+    const object_id = blk: {
+        var source = try zova.Database.create(source_path);
+        defer source.deinit();
+        try source.bindObjectStore(object_store_path);
+        try source.bindVectorStore(vector_store_path);
+        try source.bindGraphStore(graph_store_path);
+        const id = try source.putObject("bound object bytes");
+        try source.putObjectChunk(zova.objectChunkId("loose bound chunk"), "loose bound chunk");
+        try source.createVectorCollection("docs", .{ .dimensions = 2, .metric = .l2 });
+        try source.putVector("docs", "a", .{ .f32 = &.{ 1, 2 } });
+        try source.createGraph("app");
+        try source.putGraphNode(.{ .graph_name = "app", .node_id = "doc:a", .kind = "doc", .target_type = .vector, .target_namespace = "docs", .target_ref = "a" });
+        try source.putGraphNode(.{ .graph_name = "app", .node_id = "note:1", .kind = "note", .target_type = .external, .target_ref = "note:1" });
+        try source.putGraphEdge(.{ .graph_name = "app", .from_node_id = "note:1", .edge_type = "about", .to_node_id = "doc:a" });
+        break :blk id;
+    };
+
+    var result = try runCli(&.{ "zova", "salvage", "--json", source_path, dest_path });
+    defer result.deinit();
+    try expectCliCode(&result, 0);
+    var parsed = try parseJson(result.stdout);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try std.testing.expectEqual(@as(i64, 1), try jsonObjectInt(root, "copied", "objects"));
+    try std.testing.expectEqual(@as(i64, 1), try jsonObjectInt(root, "copied", "vectors"));
+    try std.testing.expectEqual(@as(i64, 2), try jsonObjectInt(root, "copied", "graph_nodes"));
+    try std.testing.expectEqual(@as(i64, 1), try jsonObjectInt(root, "copied", "graph_edges"));
+
+    var destination = try zova.Database.open(dest_path);
+    defer destination.deinit();
+    try std.testing.expect(try destination.hasObject(object_id));
+    try std.testing.expect(try destination.hasObjectChunk(zova.objectChunkId("loose bound chunk")));
+    try std.testing.expect(try destination.hasVector("docs", "a"));
+    try std.testing.expect(try destination.hasGraphEdge("app", "note:1", "about", "doc:a"));
 }
 
 test "cli salvage copies valid graph data and skips invalid graph targets" {

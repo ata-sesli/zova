@@ -17,8 +17,12 @@ const UserSqlRowCopyResult = @import("types.zig").UserSqlRowCopyResult;
 const boundedCommandErrorFormat = @import("parse.zig").boundedCommandErrorFormat;
 const buildInsertAllSql = @import("common.zig").buildInsertAllSql;
 const cli_json_version = @import("common.zig").cli_json_version;
+const addRefusedCwalSetIssue = @import("diagnostics.zig").addRefusedCwalSetIssue;
 const diagnosticErrorReport = @import("diagnostics.zig").diagnosticErrorReport;
+const diagnosticGraphSchemaPrefix = @import("common.zig").diagnosticGraphSchemaPrefix;
 const diagnosticIssueAreaText = @import("render.zig").diagnosticIssueAreaText;
+const diagnosticObjectSchemaPrefix = @import("common.zig").diagnosticObjectSchemaPrefix;
+const diagnosticVectorSchemaPrefix = @import("common.zig").diagnosticVectorSchemaPrefix;
 const emptyDatabaseSummary = @import("inspect.zig").emptyDatabaseSummary;
 const graphTargetTypeFromText = @import("common.zig").graphTargetTypeFromText;
 const isExtensionHealthError = @import("common.zig").isExtensionHealthError;
@@ -60,11 +64,20 @@ pub fn salvageCommand(
     const source = try allocator.dupeSentinel(u8, parsed.source_path, 0);
     defer allocator.free(source);
 
+    // A CWAL set that refuses to open is read outside the protocol, and the
+    // report names the members that hold its newest commit marker.
+    var refused_cwal_set = false;
     var db = open_salvage_db: {
         const opened = openDatabaseWithOptions(ctx, source, .{ .read_only = true }) catch |err| {
             if (isExtensionHealthError(err)) {
                 break :open_salvage_db zova.Database.openForExtensionInspectionWithExtensions(source, .{}, ctx.registry) catch |inspect_err| {
                     return openErrorFormat(stderr, "salvage", parsed.format, inspect_err);
+                };
+            }
+            if (err == error.CommitSetNeedsRepair) {
+                refused_cwal_set = true;
+                break :open_salvage_db zova.Database.openRefusedCwalSetForSalvageWithExtensions(source, ctx.registry) catch |salvage_err| {
+                    return openErrorFormat(stderr, "salvage", parsed.format, salvage_err);
                 };
             }
             return openErrorFormat(stderr, "salvage", parsed.format, err);
@@ -98,7 +111,7 @@ pub fn salvageCommand(
     };
     defer summary.deinit(allocator);
 
-    const report = runDiagnostics(allocator, &db, parsed.limit) catch |err| {
+    var report = runDiagnostics(allocator, &db, parsed.limit) catch |err| {
         const diagnostic_report = try diagnosticErrorReport(allocator, parsed.limit, .sqlite, "diagnostic_check", @errorName(err));
         var plan = buildSalvagePlan(summary, diagnostic_report);
         defer plan.deinit(allocator);
@@ -106,6 +119,11 @@ pub fn salvageCommand(
             writeSalvageFailure(stderr, parsed.format, parsed.source_path, plan)
         else
             writeSalvageExecutionFailure(stderr, parsed.format, parsed.source_path, parsed.destination_path.?, plan);
+    };
+
+    if (refused_cwal_set) addRefusedCwalSetIssue(allocator, &db, &report) catch |err| {
+        report.deinit(allocator);
+        return salvageExecutionErrorFormat(stderr, parsed.format, parsed.source_path, parsed.destination_path orelse "", err);
     };
 
     var plan = buildSalvagePlan(summary, report);
@@ -833,7 +851,11 @@ fn copyUserTableRows(
 }
 
 fn copyValidObjects(allocator: std.mem.Allocator, source: *zova.Database, destination: *zova.Database) !u64 {
-    var objects = try source.prepare("select object_id from _zova_objects order by hex(object_id)");
+    // The private tables of a bound store are in its attached schema; the
+    // reads below go through the routed API.
+    const sql = try std.fmt.allocPrintSentinel(allocator, "select object_id from {s}_zova_objects order by hex(object_id)", .{diagnosticObjectSchemaPrefix(source)}, 0);
+    defer allocator.free(sql);
+    var objects = try source.prepare(sql);
     defer objects.deinit();
 
     var copied: u64 = 0;
@@ -856,14 +878,17 @@ fn copyValidObjects(allocator: std.mem.Allocator, source: *zova.Database, destin
 }
 
 fn copyValidLooseChunks(allocator: std.mem.Allocator, source: *zova.Database, destination: *zova.Database) !u64 {
-    var chunks = try source.prepare(
+    const prefix = diagnosticObjectSchemaPrefix(source);
+    const sql = try std.fmt.allocPrintSentinel(allocator,
         \\select c.chunk_hash
-        \\from _zova_chunks c
+        \\from {s}_zova_chunks c
         \\where not exists (
-        \\  select 1 from _zova_object_chunks oc where oc.chunk_hash = c.chunk_hash
+        \\  select 1 from {s}_zova_object_chunks oc where oc.chunk_hash = c.chunk_hash
         \\)
         \\order by hex(c.chunk_hash)
-    );
+    , .{ prefix, prefix }, 0);
+    defer allocator.free(sql);
+    var chunks = try source.prepare(sql);
     defer chunks.deinit();
 
     var copied: u64 = 0;
@@ -893,6 +918,15 @@ fn copyValidVectors(
 ) !void {
     var collections = try source.listVectorCollections(allocator);
     defer collections.deinit(allocator);
+    const prefix = diagnosticVectorSchemaPrefix(source);
+    const sql = try std.fmt.allocPrintSentinel(allocator,
+        \\select v.vector_id
+        \\from {s}_zova_vectors v
+        \\join {s}_zova_vector_collections c on c.collection_key = v.collection_key
+        \\where c.name = ?
+        \\order by v.vector_id asc
+    , .{ prefix, prefix }, 0);
+    defer allocator.free(sql);
 
     for (collections.items) |collection| {
         destination.createVectorCollection(collection.name, .{
@@ -902,13 +936,7 @@ fn copyValidVectors(
         }) catch continue;
         copied.vector_collections += 1;
 
-        var vectors = try source.prepare(
-            \\select v.vector_id
-            \\from _zova_vectors v
-            \\join _zova_vector_collections c on c.collection_key = v.collection_key
-            \\where c.name = ?
-            \\order by v.vector_id asc
-        );
+        var vectors = try source.prepare(sql);
         defer vectors.deinit();
         try vectors.bindText(1, collection.name);
 
@@ -938,9 +966,10 @@ fn copyValidGraphs(
     destination: *zova.Database,
     copied: *SalvageCounts,
 ) !void {
-    _ = allocator;
-
-    var graphs = try source.prepare("select name from _zova_graphs order by created_order, name");
+    const prefix = diagnosticGraphSchemaPrefix(source);
+    const graphs_sql = try std.fmt.allocPrintSentinel(allocator, "select name from {s}_zova_graphs order by created_order, name", .{prefix}, 0);
+    defer allocator.free(graphs_sql);
+    var graphs = try source.prepare(graphs_sql);
     defer graphs.deinit();
     while ((try graphs.step()) == .row) {
         const graph_name = graphs.columnText(0);
@@ -949,12 +978,14 @@ fn copyValidGraphs(
         copied.graphs += 1;
     }
 
-    var nodes = try source.prepare(
+    const nodes_sql = try std.fmt.allocPrintSentinel(allocator,
         \\select g.name, n.node_id, n.kind, n.target_type, n.target_namespace, n.target_ref
-        \\from _zova_graph_nodes n
-        \\join _zova_graphs g on g.graph_key = n.graph_key
+        \\from {s}_zova_graph_nodes n
+        \\join {s}_zova_graphs g on g.graph_key = n.graph_key
         \\order by n.created_order, g.name, n.node_id
-    );
+    , .{ prefix, prefix }, 0);
+    defer allocator.free(nodes_sql);
+    var nodes = try source.prepare(nodes_sql);
     defer nodes.deinit();
     while ((try nodes.step()) == .row) {
         const graph_name = nodes.columnText(0);
@@ -985,15 +1016,17 @@ fn copyValidGraphs(
         copied.graph_nodes += 1;
     }
 
-    var edges = try source.prepare(
+    const edges_sql = try std.fmt.allocPrintSentinel(allocator,
         \\select g.name, from_node.node_id, et.name, to_node.node_id
-        \\from _zova_graph_edges e
-        \\join _zova_graphs g on g.graph_key = e.graph_key
-        \\join _zova_graph_edge_types et on et.graph_key=e.graph_key and et.edge_type_key=e.edge_type_key
-        \\join _zova_graph_nodes from_node on from_node.graph_key = e.graph_key and from_node.node_key = e.from_node_key
-        \\join _zova_graph_nodes to_node on to_node.graph_key = e.graph_key and to_node.node_key = e.to_node_key
+        \\from {s}_zova_graph_edges e
+        \\join {s}_zova_graphs g on g.graph_key = e.graph_key
+        \\join {s}_zova_graph_edge_types et on et.graph_key=e.graph_key and et.edge_type_key=e.edge_type_key
+        \\join {s}_zova_graph_nodes from_node on from_node.graph_key = e.graph_key and from_node.node_key = e.from_node_key
+        \\join {s}_zova_graph_nodes to_node on to_node.graph_key = e.graph_key and to_node.node_key = e.to_node_key
         \\order by e.created_order, g.name, from_node.node_id, et.name, to_node.node_id
-    );
+    , .{ prefix, prefix, prefix, prefix, prefix }, 0);
+    defer allocator.free(edges_sql);
+    var edges = try source.prepare(edges_sql);
     defer edges.deinit();
     while ((try edges.step()) == .row) {
         const graph_name = edges.columnText(0);
