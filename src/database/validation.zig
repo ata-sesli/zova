@@ -7,6 +7,7 @@ const kv_impl = @import("../kv.zig");
 const object_impl = @import("../object.zig");
 const sqlite = @import("../sqlite.zig");
 const vector_impl = @import("../vector.zig");
+const commit_protocol = @import("commit_protocol.zig");
 
 const Error = @import("types.zig").Error;
 const attachedObjectStoreIdAlloc = @import("metadata.zig").attachedObjectStoreIdAlloc;
@@ -67,6 +68,7 @@ pub fn validateObjectStoreDatabaseExpected(db: *sqlite.Database, expected_format
     defer std.heap.c_allocator.free(store_id);
     try validateExtensionSchema(db);
     try validateObjectSchemaExpected(db, expected_format);
+    try validateStandaloneCommitProtocol(db, expected_format);
 }
 
 fn validateObjectStoreDatabase(db: *sqlite.Database) Error!void {
@@ -85,6 +87,7 @@ pub fn validateAttachedObjectStoreAlloc(
     errdefer allocator.free(store_id);
     try validateAttachedExtensionSchema(db, schema_name);
     try validateAttachedObjectSchema(db, schema_name);
+    try commit_protocol.validateMember(db, schema_name);
     return store_id;
 }
 
@@ -96,6 +99,7 @@ pub fn validateVectorStoreDatabaseExpected(db: *sqlite.Database, expected_format
     defer std.heap.c_allocator.free(store_id);
     try validateExtensionSchema(db);
     try validateVectorSchemaExpected(db, expected_format);
+    try validateStandaloneCommitProtocol(db, expected_format);
 }
 
 fn validateVectorStoreDatabase(db: *sqlite.Database) Error!void {
@@ -114,6 +118,7 @@ pub fn validateAttachedVectorStoreAlloc(
     errdefer allocator.free(store_id);
     try validateAttachedExtensionSchema(db, schema_name);
     try validateAttachedVectorSchema(db, schema_name);
+    try commit_protocol.validateMember(db, schema_name);
     return store_id;
 }
 
@@ -125,6 +130,7 @@ pub fn validateGraphStoreDatabaseExpected(db: *sqlite.Database, expected_format:
     defer std.heap.c_allocator.free(store_id);
     try validateExtensionSchema(db);
     try validateGraphSchema(db);
+    try validateStandaloneCommitProtocol(db, expected_format);
 }
 
 fn validateGraphStoreDatabase(db: *sqlite.Database) Error!void {
@@ -143,6 +149,7 @@ pub fn validateAttachedGraphStoreAlloc(
     errdefer allocator.free(store_id);
     try validateAttachedExtensionSchema(db, schema_name);
     try validateAttachedGraphSchema(db, schema_name);
+    try commit_protocol.validateMember(db, schema_name);
     return store_id;
 }
 
@@ -272,6 +279,14 @@ pub fn validateZovaSchema(db: *sqlite.Database) Error!void {
     try validateGraphSchema(db);
     try validateKvSchema(db);
     try validateOptionalBoundStoreSchema(db);
+    try commit_protocol.validateMember(db, "main");
+}
+
+/// A store file opened alone may carry a marker table from format 15 on;
+/// older formats never do.
+fn validateStandaloneCommitProtocol(db: *sqlite.Database, expected_format: []const u8) Error!void {
+    const version = parseFormatVersion(expected_format) orelse return error.NotZovaDatabase;
+    if (version >= commit_protocol.first_format_version) try commit_protocol.validateStandaloneStore(db);
 }
 
 pub fn validateExtensionLifecycleCore(db: *sqlite.Database) anyerror!void {
@@ -317,7 +332,7 @@ pub fn validateObjectSchemaExpected(db: *sqlite.Database, expected_format: []con
         try validateObjectSchemaSql(db, object_impl.objects_schema_sql, object_impl.format13_chunks_schema_sql, object_impl.object_chunks_schema_sql);
         return validateObjectChunkIndex(db, "main.");
     }
-    if (expected_version == 14) {
+    if (expected_version == 14 or expected_version == 15) {
         try validateObjectSchemaSql(db, object_impl.objects_schema_sql, object_impl.chunks_schema_sql, object_impl.object_chunks_schema_sql);
         return validateObjectChunkIndex(db, "main.");
     }

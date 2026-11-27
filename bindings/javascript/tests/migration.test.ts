@@ -57,7 +57,7 @@ describe("Storage-format migration", () => {
       database.close();
 
       const currentInfo = probeFormat(current);
-      expect(currentInfo.formatVersion).toBe(14);
+      expect(currentInfo.formatVersion).toBe(15);
       expect(currentInfo.compatibility).toBe("current");
 
       expect(sameBytes(readFileSync(source), before)).toBe(true);
@@ -84,7 +84,7 @@ describe("Storage-format migration", () => {
     migrateDatabase(source, destination);
 
     const info = probeFormat(destination);
-    expect(info.formatVersion).toBe(14);
+    expect(info.formatVersion).toBe(15);
     expect(info.compatibility).toBe("current");
     expect(sameBytes(readFileSync(source), before)).toBe(true);
 
@@ -140,7 +140,7 @@ describe("Storage-format migration", () => {
     await AsyncDatabase.migrateDatabase(source, destination);
 
     const migratedInfo = await AsyncDatabase.probeFormat(destination);
-    expect(migratedInfo.formatVersion).toBe(14);
+    expect(migratedInfo.formatVersion).toBe(15);
     expect(migratedInfo.compatibility).toBe("current");
 
     const syncInfo = probeFormat(destination);
@@ -153,11 +153,11 @@ describe("Storage-format migration", () => {
     const before = readFileSync(source);
     const destination = join(temporaryDirectory(), "migrate-ext-empty-destination.zova");
     migrateDatabase(source, destination, true, { bundlePaths: [] });
-    expect(probeFormat(destination)).toEqual({ formatVersion: 14, compatibility: "current" });
+    expect(probeFormat(destination)).toEqual({ formatVersion: 15, compatibility: "current" });
 
     const asyncDestination = join(temporaryDirectory(), "migrate-ext-empty-async.zova");
     await AsyncDatabase.migrateDatabase(source, asyncDestination, true, { bundlePaths: [] });
-    expect(probeFormat(asyncDestination)).toEqual({ formatVersion: 14, compatibility: "current" });
+    expect(probeFormat(asyncDestination)).toEqual({ formatVersion: 15, compatibility: "current" });
     expect(sameBytes(readFileSync(source), before)).toBe(true);
   });
 

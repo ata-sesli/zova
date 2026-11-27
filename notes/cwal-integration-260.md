@@ -312,8 +312,9 @@ enabling and of disabling. Both run on a set opened alone, by its one
 writer.
 
 Enable:
-1. Create `_zova_cwal_marker` in every member and set `commit_protocol` in
-   main. These may be separate commits.
+1. Set `commit_protocol` in main, then create `_zova_cwal_marker` in every
+   member. These may be separate commits, but the key commits before any
+   marker table (decision 9), so a marker table never exists without it.
 2. Run a full `TRUNCATE` checkpoint of every member.
 3. Set `application_id` in main: one single-file commit.
 4. Run a `TRUNCATE` checkpoint of main, so the raw header shows the flag.
@@ -322,7 +323,7 @@ Disable:
 1. Run recovery, then a full `TRUNCATE` checkpoint of every member.
 2. Clear `application_id` (one commit), then run a `TRUNCATE` checkpoint
    of main.
-3. Drop the marker tables and clear `commit_protocol`.
+3. Drop every marker table, then clear `commit_protocol` (decision 9).
 
 Reconciling at open:
 - **Raw flag clear, SQLite flag clear.** A plain set. Marker tables or the
@@ -447,7 +448,8 @@ native build, rather than only in experimental builds, so the generated C
 does not fork. CWAL itself sits behind a build option,
 `-Dexperimental-cwal`, off by default. With the option off, enabling CWAL
 returns `Unsupported`, and opening a CWAL set refuses rather than opening
-it plainly.
+it plainly. The refusal uses the existing `UnsupportedZovaVersion`
+(C ABI code 32), decision 9.
 
 ## 10. Binding behavior
 
@@ -543,6 +545,63 @@ Each phase lands with its tests. Nothing ships outside
    - Header-flag detection, member list from main, ownership checks and
      recovery ordering (§3, §7, §8).
    - Enable and disable calls.
+
+**Phase 3 status (2026-11-27).** The format-15 storage contract is in
+place; the CWAL open path and the transitions are not.
+
+- Retained format-14 fixtures, produced before format 15 was activated with
+  the CLI built from the unmodified `v1.5.0` tag (`5d760d4`, `zova 1.5.0`,
+  ReleaseSafe), in a temporary worktree since removed. In one directory
+  holding copies of the format-13 fixtures:
+
+  ```sh
+  zova migrate --json empty-main-format-13.zova empty-main-format-14.zova
+  zova migrate --json format-13.zova format-14.zova
+  zova migrate --json bound-main-format-13.zova bound-main-format-14.zova
+  zova vector-store create --json empty-vector-store-format-14.zova
+  ```
+
+  - Every migration reported `verified: true`; the format-13 copies stayed
+    byte-identical. A first run of the `format-13.zova` migration returned
+    `NotZovaDatabase` once and did not reproduce in three later runs with
+    the same binary and source; the cause is unknown.
+  - Every output has `format_version = 14` and `integrity_check = ok`.
+    `auto_vacuum` is `0` for migrated files and `2` (incremental) for the
+    new vector store, as in the format-13 set. Row counts match the
+    format-13 sources table by table. `bound-main-format-14.zova` binds
+    `bound-main-format-14.{objects,vectors,graphs}.zova`.
+
+  | File | SHA-256 |
+  | --- | --- |
+  | `bound-main-format-14.graphs.zova` | `14e58ea056725386fab7dcab99a8f4f815305e7b4eeb5757ae1bed30f602e018` |
+  | `bound-main-format-14.objects.zova` | `919f56b8081817500d122f412c19f4991e34be93ad619846a5ed0fd916193f42` |
+  | `bound-main-format-14.vectors.zova` | `aebd9733cfcc86d2f3a9906fa5d6c19c6e3aa334771b1f07ceccebb46493f93b` |
+  | `bound-main-format-14.zova` | `a19c5dd7533fade6c527026e72e9cb80aad06b976944a9c416ca8bed2e7793a8` |
+  | `empty-main-format-14.zova` | `0c81f7c7cb55ef2a0286af624244b5b828e40adc211556c73e3a619905cf9878` |
+  | `empty-vector-store-format-14.zova` | `12fd5146c6a33ec9a0b72636fc696883991e81f452b4920431e6ee3f98744851` |
+  | `format-14.zova` | `f4eee8baa238b1f01ec3db907dc67349e4652a0e6280429226c2cb7097e2f524` |
+
+- Format 15 (`src/version.zig`) with a 14 → 15 step that changes only
+  `format_version`. The format-14 sets join `check-storage-compat` and the
+  pinned manifest.
+- `src/database/commit_protocol.zig` defines the three markers (§7):
+  `commit_protocol = 'cwal-1'`, `_zova_cwal_marker` with the prototype's
+  columns, and `application_id = 0x5A435731` ("ZCW1"). Enable must set the
+  key before creating any marker table and disable must drop every marker
+  table before clearing the key, so validation can require the key for any
+  marker table at every crash point; the key alone is valid. This tightens
+  the §7 enable order (step 1 sets the key first) and disable order
+  (step 3 drops the tables first).
+- Validation: the key is absent or `cwal-1`; a marker table in main or an
+  attached store needs the key and the exact definition; a store opened
+  alone accepts only the exact definition.
+- Refusal: `Database.open`, logical inspection and `migrateDatabase` read
+  main's raw header before SQLite opens it, and `pragma application_id`
+  after opening (a flag still only in the WAL). A CWAL set is refused with
+  `UnsupportedZovaVersion` in every build, including
+  `-Dexperimental-cwal`, until the open path lands, and the refused
+  connection is set not to checkpoint on close. `UnsupportedZovaVersion`
+  is the decided refusal code (decision 9).
 4. **Transactions.** Commit and read interception (§4) and the authorizer
    layer (§5).
 5. **Maintenance.** The §6 table, one operation at a time.
@@ -591,6 +650,15 @@ Each phase lands with its tests. Nothing ships outside
    (`SQLITE_MAX_ATTACHED=31`, `max_members = 32`, §1) and are not rerun
    or rewritten; phase 7 qualifies the integrated build at its own
    limit of 31.
+9. **Format-15 details** (2026-11-27).
+   - A CWAL set that a build cannot open is refused with the existing
+     `UnsupportedZovaVersion` (C ABI code 32); no new code is added.
+   - Transition order: enable sets `commit_protocol` before it creates any
+     marker table, and disable drops every marker table before it clears
+     the key (§7).
+   - Format 15 ships with package version 1.6.0. Until the release bump,
+     current-version prose pairs the unreleased tree's format 15 with
+     version 1.5.0; `scripts/bump-version.sh` rewrites the version.
 
 Scope now: T2 and T3 only, closed with implementation and test evidence in
 the prototype before the broader integration starts. T1, T4 and T5 stay

@@ -70,10 +70,10 @@ Zova 1.0.0 established the stable native 1.x contract described in
 [API_STABILITY.md](../../API_STABILITY.md).
 The current `.zova` `format_version` is `14`.
 Zova does not migrate older format databases in place. Format-9,
-format-10, format-11, format-12 and format-13 databases can be probed and migrated forward with the crate-level
+format-10, format-11, format-12, format-13 and format-14 databases can be probed and migrated forward with the crate-level
 `probe_format(path)` and `migrate_database(source, destination, options)`
 functions: migration is explicit, copy-forward, publishes a separately
-validated format-14 destination, and never mutates the source.
+validated format-15 destination, and never mutates the source.
 `migrate_database_with_extensions(source, destination, options, &extensions)`
 takes the same `ExtensionOptions` as `Database::open_with_extensions` for
 databases with a non-bundled extension installed.

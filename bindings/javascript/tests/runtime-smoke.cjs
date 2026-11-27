@@ -9,5 +9,5 @@ const {
 
 assert.equal(packageVersion, "1.5.0");
 assert.equal(abiVersion, "1.5.0");
-assert.equal(formatVersion, "14");
+assert.equal(formatVersion, "15");
 assert.equal(sqliteVersion, "3.53.4");

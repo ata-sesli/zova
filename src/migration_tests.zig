@@ -91,6 +91,13 @@ fn scalarCount(db: *sqlite.Database, sql: [:0]const u8) !i64 {
     return stmt.columnInt64(0);
 }
 
+fn scalarTextAlloc(db: *sqlite.Database, sql: [:0]const u8) ![]u8 {
+    var stmt = try db.prepare(sql);
+    defer stmt.deinit();
+    try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
+    return std.testing.allocator.dupe(u8, stmt.columnText(0));
+}
+
 fn expectScalarTextRaw(db: *sqlite.Database, sql: [:0]const u8, expected: []const u8) !void {
     var stmt = try db.prepare(sql);
     defer stmt.deinit();
@@ -138,6 +145,7 @@ test "genuine format11 migration preserves vector rows keys and database identit
     try std.testing.expectEqual(try scalarCount(&raw, "select count(*) from _zova_vector_collections"), try scalarCount(&raw, "select count(*) from _zova_vector_sources where revision=0 and token=incarnation"));
     try std.testing.expectEqual(@as(u32, 13), try zova.runMigrationStep(&raw));
     try std.testing.expectEqual(@as(u32, 14), try zova.runMigrationStep(&raw));
+    try std.testing.expectEqual(@as(u32, 15), try zova.runMigrationStep(&raw));
     var opened = try Database.open(path);
     defer opened.deinit();
 }
@@ -188,6 +196,7 @@ test "genuine format12 migration adds the chunk-reference index and keeps auto_v
     try std.testing.expectEqual(manifest_rows, try scalarCount(&raw, "select count(*) from _zova_object_chunks"));
     try std.testing.expectEqual(@as(i64, 0), try scalarCount(&raw, "pragma auto_vacuum"));
     try std.testing.expectEqual(@as(u32, 14), try zova.runMigrationStep(&raw));
+    try std.testing.expectEqual(@as(u32, 15), try zova.runMigrationStep(&raw));
     var opened = try Database.open(path);
     defer opened.deinit();
 }
@@ -293,7 +302,7 @@ test "migrateDatabase adds the index to every member of a format-12 bound set" {
         defer raw.deinit();
         try expectChunkIndexRaw(&raw, true);
         try std.testing.expectEqual(@as(i64, 0), try scalarCount(&raw, "pragma auto_vacuum"));
-        try expectScalarTextRaw(&raw, "select value from _zova_meta where key='format_version'", "14");
+        try expectScalarTextRaw(&raw, "select value from _zova_meta where key='format_version'", "15");
     }
     try expectMigratedSetParity(std.testing.allocator, dest_main, true);
 }
@@ -341,6 +350,7 @@ test "genuine format13 migration adds raw chunk encodings without rewriting chun
     try std.testing.expectError(error.Constraint, raw.exec("insert into _zova_chunks (chunk_hash, size_bytes, data, encoding) values (zeroblob(32), 4, x'01020304', 1)"));
     try std.testing.expectError(error.Constraint, raw.exec("insert into _zova_chunks (chunk_hash, size_bytes, data, encoding) values (zeroblob(32), 4, x'01', 2)"));
 
+    try std.testing.expectEqual(@as(u32, 15), try zova.runMigrationStep(&raw));
     var opened = try Database.open(path);
     defer opened.deinit();
     {
@@ -402,6 +412,34 @@ test "format13 migration rolls back the column and schema text on a late fault" 
     try std.testing.expectEqualSlices(u8, &before, &(try fileSha256(path)));
 }
 
+test "genuine format14 migration changes only the format version and adds no CWAL markers" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    inline for (.{ "format-14.zova", "empty-main-format-14.zova" }, 0..) |name, index| {
+        const path = try copyFixture(&tmp.sub_path, 150 + index, name);
+        defer std.testing.allocator.free(path);
+        var raw = try sqlite.Database.open(path);
+        defer raw.deinit();
+        const schema_digest = "select group_concat(type || name || coalesce(sql, ''), '|') from (select * from sqlite_schema order by name)";
+        const meta_digest = "select group_concat(key || '=' || value, '|') from (select * from _zova_meta where key <> 'format_version' order by key)";
+        const schema_before = try scalarTextAlloc(&raw, schema_digest);
+        defer std.testing.allocator.free(schema_before);
+        const meta_before = try scalarTextAlloc(&raw, meta_digest);
+        defer std.testing.allocator.free(meta_before);
+        try std.testing.expectError(error.MigrationRequired, Database.open(path));
+
+        try std.testing.expectEqual(@as(u32, 15), try zova.runMigrationStep(&raw));
+        try expectScalarTextRaw(&raw, "select value from _zova_meta where key='format_version'", "15");
+        try expectScalarTextRaw(&raw, schema_digest, schema_before);
+        try expectScalarTextRaw(&raw, meta_digest, meta_before);
+        try std.testing.expectEqual(@as(i64, 0), try scalarCount(&raw, "select count(*) from sqlite_schema where name = '_zova_cwal_marker'"));
+        try std.testing.expectEqual(@as(i64, 0), try scalarCount(&raw, "select count(*) from _zova_meta where key = 'commit_protocol'"));
+        try std.testing.expectEqual(@as(i64, 0), try scalarCount(&raw, "pragma application_id"));
+        var db = try Database.open(path);
+        db.deinit();
+    }
+}
+
 test "format13 source that already carries a chunk encoding column fails preflight" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -414,7 +452,7 @@ test "format13 source that already carries a chunk encoding column fails preflig
     try expectScalarTextRaw(&raw, "select value from _zova_meta where key='format_version'", "13");
 }
 
-test "migrateDatabase migrates every member of a format-13 bound set to format 14" {
+test "migrateDatabase migrates every member of a format-13 bound set through format 14" {
     const object_impl = @import("object.zig");
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -478,7 +516,7 @@ test "migrateDatabase migrates every member of a format-13 bound set to format 1
         defer raw.deinit();
         try expectChunksSchemaRaw(&raw, object_impl.chunks_schema_sql);
         try std.testing.expectEqual(@as(i64, 0), try scalarCount(&raw, "select count(*) from _zova_chunks where encoding <> 0"));
-        try expectScalarTextRaw(&raw, "select value from _zova_meta where key='format_version'", "14");
+        try expectScalarTextRaw(&raw, "select value from _zova_meta where key='format_version'", "15");
     }
     try expectMigratedSetParity(std.testing.allocator, dest_main, true);
 }
@@ -875,7 +913,7 @@ test "migration refuses current pre-migratable and future formats without mutati
             try raw.exec(
                 \\create table _zova_meta (key text primary key, value text not null);
                 \\insert into _zova_meta (key, value) values ('magic', 'zova');
-                \\insert into _zova_meta (key, value) values ('format_version', '14');
+                \\insert into _zova_meta (key, value) values ('format_version', '16');
             );
         }
 

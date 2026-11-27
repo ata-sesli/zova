@@ -15,15 +15,15 @@ host foundation.
 Current package version: `1.5.0`.
 
 Zova `1.0.0` established the stable native 1.x contract. The current
-`.zova` file `format_version` is `14`, and the
+`.zova` file `format_version` is `15`, and the
 earliest migratable format is `9`. Open never migrates silently: format-9,
-format-10, format-11, format-12 and format-13 databases are reported as migration-required and left byte-identical,
+format-10, format-11, format-12, format-13 and format-14 databases are reported as migration-required and left byte-identical,
 and downgrades are unsupported. Older databases migrate forward with the
 explicit, copy-forward probe and migration surfaces (`zova format` and
 `zova migrate` on the CLI, `zova_database_probe_format` and
 `zova_database_migrate` on the C ABI, and aligned APIs in the Rust, Python, Go,
 and JavaScript bindings). Migration writes only to a new, separately validated
-format-14 destination and never mutates the source.
+format-15 destination and never mutates the source.
 
 [API stability](API_STABILITY.md) defines the stable 1.x public
 contract. [Storage compatibility](docs/storage-compatibility.md) is the normative 1.x
@@ -52,11 +52,14 @@ the exceptions.
 Rust packages now select target-specific generated-C companion crates without
 requiring consumer-side Zig or native-source downloads. Python wheels retain
 CPython 3.13 stable-ABI coverage for Python 3.13 and 3.14. Storage
-is format 14 with explicit 13→14 migration, which adds opt-in per-chunk LZ4
-compression for objects; migrated chunks stay uncompressed. Format 13 added a
+is format 15 with explicit 14→15 migration; format 15 reserves the on-disk
+markers of an experimental cross-file commit protocol and changes nothing
+else, and a file that carries them is refused by every build of this release.
+Format 14 added opt-in per-chunk LZ4 compression for objects; migrated chunks
+stay uncompressed. Format 13 added a
 chunk-reference index for fast object deletes; new files use incremental
-auto-vacuum and `zova reclaim` releases free pages in place. Zova 1.4.0 used
-format 13 and Zova 1.3.0 used format 12.
+auto-vacuum and `zova reclaim` releases free pages in place. Zova 1.5.0 used
+format 14, Zova 1.4.0 used format 13 and Zova 1.3.0 used format 12.
 See the
 [browser package guide](bindings/wasm/README.md) for lifecycle and storage limits.
 
@@ -1309,7 +1312,7 @@ with `zova migrate`:
 
 ```sh
 zova format app.zova
-zova migrate app.zova app-format-14.zova
+zova migrate app.zova app-format-15.zova
 ```
 
 The same workflow is available through `zova_database_probe_format` and

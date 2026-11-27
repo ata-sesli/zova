@@ -87,10 +87,10 @@ Version 1.4.0 and earlier do not include libraries; point cgo at a release C ABI
 archive as described below.
 
 The current `.zova` format is 14, and Zova does not migrate older
-format databases in place. Format-9, format-10, format-11, format-12 and format-13 databases can be probed and
+format databases in place. Format-9, format-10, format-11, format-12, format-13 and format-14 databases can be probed and
 migrated forward with the package-level `ProbeFormat(path)` and
 `MigrateDatabase(source, destination, options...)` functions: migration is
-explicit, copy-forward, publishes a separately validated format-14 destination,
+explicit, copy-forward, publishes a separately validated format-15 destination,
 and never mutates the source. `MigrateDatabaseWithExtensions(source,
 destination, options, extensions)` takes the same `ExtensionOptions` as
 `OpenWithExtensions` for databases with a non-bundled extension installed.

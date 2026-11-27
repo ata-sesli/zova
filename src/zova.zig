@@ -542,9 +542,11 @@ pub fn restoreBackup(source_path: [:0]const u8, dest_path: [:0]const u8, options
 pub fn openForLogicalInspection(path: [:0]const u8) Error!Database {
     if (!isZovaPath(path)) return error.NotZovaPath;
     try ensureSourcePathExists(path);
+    try commit_protocol.refuseRawFlag(path);
 
     var raw = try sqlite.Database.openWithFlags(path, .read_only);
     errdefer raw.deinit();
+    try commit_protocol.refuseSqliteFlag(&raw);
     try enableForeignKeys(&raw);
     try vector_sql.register(&raw);
     try graph_sql.register(&raw);
@@ -675,6 +677,7 @@ pub fn migrateDatabaseInternal(
     if (!isZovaPath(source_path)) return error.NotZovaPath;
     if (!isZovaPath(destination_path)) return error.NotZovaPath;
     try ensureSourcePathExists(source_path);
+    try commit_protocol.refuseRawFlag(source_path);
 
     // Fast classification before touching destinations so unsupported sources
     // are rejected without creating anything.
@@ -1108,10 +1111,12 @@ pub const Database = struct {
         try registry.validate();
         if (!isZovaPath(path)) return error.NotZovaPath;
         try ensurePathExists(path);
+        try commit_protocol.refuseRawFlag(path);
 
         const flags: sqlite.OpenFlags = if (options.read_only) .read_only else .read_write;
         var raw = try sqlite.Database.openWithFlags(path, flags);
         errdefer raw.deinit();
+        try commit_protocol.refuseSqliteFlag(&raw);
 
         try enableForeignKeys(&raw);
         if (options.busy_timeout_ms != 0) try raw.setBusyTimeout(options.busy_timeout_ms);
@@ -3359,6 +3364,7 @@ fn verifyStoredKv(db: *Database, progress: *VerifyProgress) Error!void {
 const mapSqliteResultCode = @import("database/metadata.zig").mapSqliteResultCode;
 
 const validateZovaSchema = @import("database/validation.zig").validateZovaSchema;
+const commit_protocol = @import("database/commit_protocol.zig");
 
 const validateExtensionLifecycleCore = @import("database/validation.zig").validateExtensionLifecycleCore;
 
@@ -3402,5 +3408,6 @@ comptime {
         _ = @import("database_concurrency_tests.zig");
         _ = @import("database_journal_tests.zig");
         _ = @import("database_read_consistency_tests.zig");
+        _ = @import("database_commit_protocol_tests.zig");
     }
 }

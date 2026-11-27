@@ -765,7 +765,7 @@ export function objectChunkId(data: Uint8Array): Promise<Uint8Array> { return ha
 /** The zova-wasm package version. */
 export const packageVersion = "1.5.0";
 /** The storage format this package creates. */
-export const formatVersion = "14";
+export const formatVersion = "15";
 /** The bundled SQLite version. */
 export const sqliteVersion = "3.53.4";
 

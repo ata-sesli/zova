@@ -4,7 +4,7 @@ Zova for browsers, in memory or named OPFS storage: SQL, binary KV,
 transactions, prepared statements, objects, exact vectors and graphs. The real Zova
 core and bundled SQLite run inside a dedicated worker as one WebAssembly module.
 
-This package follows the repository release (`1.5.0`, format 14) and the native
+This package follows the repository release (`1.5.0`, format 15) and the native
 `zova-js` API, except where a browser makes that impossible (see
 [Native API parity](#native-api-parity)). From 1.5.0 its API is a stable 1.x
 surface; [API_STABILITY.md](../../API_STABILITY.md#browser-package-zova-wasm)

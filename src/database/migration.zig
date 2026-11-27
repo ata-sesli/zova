@@ -67,7 +67,14 @@ pub const migration_steps = [_]MigrationStep{
     .{ .from_version = 11, .to_version = 12, .apply = migrateFormat11To12 },
     .{ .from_version = 12, .to_version = 13, .apply = migrateFormat12To13 },
     .{ .from_version = 13, .to_version = 14, .apply = migrateFormat13To14 },
+    .{ .from_version = 14, .to_version = 15, .apply = migrateFormat14To15 },
 };
+
+fn migrateFormat14To15(db: *sqlite.Database) Error!void {
+    // Format 15 only adds the optional CWAL markers
+    // (`database/commit_protocol.zig`); a migrated set starts without them.
+    _ = db;
+}
 
 /// `_zova_chunks` text exactly as SQLite stores it for a newly created table:
 /// SQLite rewrites the leading keywords to `CREATE TABLE`. `VACUUM` (and so

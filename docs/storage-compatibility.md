@@ -19,7 +19,7 @@ in another.
 | Package version | Zova release identity across every distribution channel | `src/version.zig` `package_version` | `1.5.0` |
 | C ABI version | Compatibility of the exported C ABI and generated C | `src/version.zig` `abi_version_*` | `1.5.0` (`1.5.0` numeric components) |
 | SQLite version | The vendored SQLite amalgamation, and separately SQLite's own file format | `src/version.zig` `sqlite_version` | `3.53.4` |
-| Zova storage format | The layout of a `.zova` database, recorded in `_zova_meta.format_version` | `src/version.zig` `format_version` | `14` |
+| Zova storage format | The layout of a `.zova` database, recorded in `_zova_meta.format_version` | `src/version.zig` `format_version` | `15` |
 
 A SQLite upgrade does not change the Zova storage format and never requires a
 Zova migration. A package or ABI release does not by itself change the storage
@@ -57,7 +57,7 @@ Probing is separate from opening and is always safe: `zova format` and
 `probeDatabaseFormat` open a read-only raw SQLite connection, read only the
 identity metadata required for classification, and never write.
 
-## Migrating formats 9 through 13 to format 14
+## Migrating formats 9 through 14 to format 15
 
 A migration runs offline, writes only to a new destination, and leaves the source
 untouched. Probe first, then migrate.
@@ -66,8 +66,8 @@ untouched. Probe first, then migrate.
 
 ```sh
 zova format app.zova
-zova migrate --dry-run app.zova app-format-14.zova
-zova migrate app.zova app-format-14.zova
+zova migrate --dry-run app.zova app-format-15.zova
+zova migrate app.zova app-format-15.zova
 ```
 
 `zova format` prints the source format, the current format, the earliest
@@ -188,7 +188,7 @@ zova_status status = zova_database_probe_format(&probe);
 
 zova_database_migrate_request migrate = {
     .source_path = "app.zova",
-    .destination_path = "app-format-14.zova",
+    .destination_path = "app-format-15.zova",
     .flags = 0, /* ZOVA_MIGRATE_NO_VERIFY skips destination verification */
     .out_error_message = &message,
 };
@@ -209,7 +209,7 @@ bundle paths and plugin descriptors linked into the host process:
 const char *bundles[] = { "networkit.zovaext" };
 zova_database_migrate_extensions_request migrate = {
     .source_path = "app.zova",
-    .destination_path = "app-format-14.zova",
+    .destination_path = "app-format-15.zova",
     .extension_bundle_paths = bundles,
     .extension_bundle_count = 1,
     .out_error_message = &message,
@@ -224,7 +224,7 @@ use zova::{migrate_database, probe_format, MigrateOptions};
 
 let info = probe_format("app.zova")?;
 assert_eq!(info.compatibility, zova::FormatCompatibility::Migratable);
-migrate_database("app.zova", "app-format-14.zova", MigrateOptions::default())?;
+migrate_database("app.zova", "app-format-15.zova", MigrateOptions::default())?;
 ```
 
 ### Python
@@ -234,7 +234,7 @@ import zova
 
 info = zova.probe_format("app.zova")
 assert info.compatibility is zova.FormatCompatibility.MIGRATABLE
-zova.migrate_database("app.zova", "app-format-14.zova")  # verify=True by default
+zova.migrate_database("app.zova", "app-format-15.zova")  # verify=True by default
 ```
 
 ### Go
@@ -244,7 +244,7 @@ info, err := zova.ProbeFormat("app.zova")
 if info.Compatibility != zova.FormatMigratable {
     return fmt.Errorf("unexpected compatibility: %v", info.Compatibility)
 }
-if err := zova.MigrateDatabase("app.zova", "app-format-14.zova"); err != nil {
+if err := zova.MigrateDatabase("app.zova", "app-format-15.zova"); err != nil {
     return err
 }
 ```
@@ -259,7 +259,7 @@ import { migrateDatabase, probeFormat } from "zova-js";
 
 const info = probeFormat("app.zova");
 if (info.compatibility !== "migratable") throw new Error("cannot migrate");
-migrateDatabase("app.zova", "app-format-14.zova"); // verify defaults to true
+migrateDatabase("app.zova", "app-format-15.zova"); // verify defaults to true
 ```
 
 `asyncProbeFormat` and `asyncMigrateDatabase` are the promise-returning variants.
@@ -408,6 +408,44 @@ stays raw. Open validates the exact `_zova_chunks` definition, so a format-14
 file without the column, or a format-13 file with it, is rejected as not a
 valid Zova database.
 
+## Cross-file commit markers (format 15)
+
+Format 15 reserves the on-disk markers of an experimental cross-file commit
+protocol (CWAL) for bound sets in WAL mode. The protocol is optional within
+format 15 and off unless a set enables it. A set that enables it records it in
+three places:
+
+| Marker | Where | Value |
+| --- | --- | --- |
+| `_zova_meta` key `commit_protocol` | main | `cwal-1` |
+| `_zova_cwal_marker` table | every member (main and each bound store) | `create table _zova_cwal_marker(k integer primary key, txn integer not null, mask integer not null)` |
+| SQLite `application_id` header field | main | `0x5A435731` (ASCII `ZCW1`) |
+
+Enabling sets `commit_protocol` before it creates any marker table, and
+disabling drops every marker table before it clears the key, so a marker table
+never exists without the key. Open validation enforces that rule:
+
+- `commit_protocol` is absent or exactly `cwal-1`;
+- a `_zova_cwal_marker` table must have exactly the definition above, and in
+  main or an attached store it requires main's `commit_protocol` key;
+- `commit_protocol` without marker tables is valid; it is an interrupted enable
+  or disable.
+
+Any other combination is rejected as not a valid Zova database.
+
+A plain open of a CWAL set could checkpoint a partly written cross-file commit
+into a member's database file. Zova therefore reads main's `application_id`
+from the raw file header before SQLite opens it, and again through SQLite
+after opening, because a just-committed value can still be only in the WAL.
+This release has no CWAL open path in any build, so open, logical inspection
+and migration refuse a file with the CWAL `application_id` with
+`UnsupportedZovaVersion` (`ZOVA_UNSUPPORTED_ZOVA_VERSION`, `32`), and the
+refused connection does not checkpoint. Releases that predate format 15
+classify a CWAL set as `unsupported_future` and refuse it as well.
+
+The 14 → 15 step changes only `_zova_meta.format_version`. A migrated set
+starts without any CWAL marker.
+
 ## What a migration preserves
 
 A migration preserves the logical database. User SQLite schema and rows are
@@ -429,8 +467,9 @@ chunks, manifests, and their ordering remain unchanged.
 genuine exports of the released Zova 0.26.1 build, regenerated by
 `scripts/export-format-9-fixtures.sh`; they are never hand-edited and never
 produced by editing metadata in a newer database. The format-12 fixtures were
-produced by the CLI built from the unmodified `v1.3.0` tag, and the format-13
-fixtures by the CLI built from the unmodified `v1.4.0` tag.
+produced by the CLI built from the unmodified `v1.3.0` tag, the format-13
+fixtures by the CLI built from the unmodified `v1.4.0` tag, and the format-14
+fixtures by the CLI built from the unmodified `v1.5.0` tag.
 
 `zig build check-storage-compat` is a release gate. It runs in
 `scripts/check-release.sh` and in CI, and it verifies that:
@@ -487,7 +526,7 @@ path. The source hash is identical before and after, and the only structural
 difference is the private key-value schema format 10 introduces.
 
 This recorded adjacent step is evidence, not a gate. Current migrations continue
-through formats 10, 11, 12 and 13 to format 14. The gates are the correctness, atomicity,
+through formats 10, 11, 12, 13 and 14 to format 15. The gates are the correctness, atomicity,
 source-preservation, and binding-parity assertions in
 `zig build check-storage-compat`, which recompute hashes, sizes, and counts on
 every run against every retained fixture.
