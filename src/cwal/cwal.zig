@@ -1492,7 +1492,8 @@ pub const Conn = struct {
             c.SQLITE_ALTER_TABLE, c.SQLITE_CREATE_TRIGGER, c.SQLITE_CREATE_TEMP_TRIGGER => isMarker(a2),
             c.SQLITE_PRAGMA => a2 != null and (isName(a1, "journal_mode") or isName(a1, "locking_mode") or isName(a1, "synchronous") or isName(a1, "writable_schema")),
             // Also refuses VACUUM and VACUUM INTO, which attach their
-            // output as `vacuum_db` (sqlite3RunVacuum) through this check.
+            // output as `vacuum_db` (sqlite3RunVacuum) through this check,
+            // unless `beginVacuum` approved them.
             c.SQLITE_ATTACH, c.SQLITE_DETACH => true,
             else => false,
         };
@@ -2128,8 +2129,8 @@ pub const Conn = struct {
     }
 
     /// Returns false for a commit frame written outside a commit the hook
-    /// approved: a path that bypasses the commit hook (VACUUM) would publish
-    /// it without a window, and from a reader handle.
+    /// (or `beginVacuum`) approved: a path that bypasses the commit hook
+    /// (VACUUM) would publish it without a window, and from a reader handle.
     fn observeWalWrite(conn: *Conn, bytes: []const u8) bool {
         if (conn.mode != .cwal) return true;
         if (bytes.len != wal_frame_header_size or std.mem.readInt(u32, bytes[4..8], .big) == 0) return true;
@@ -2150,12 +2151,13 @@ pub const Conn = struct {
 
     fn commitHook(arg: ?*anyopaque) callconv(.c) c_int {
         const conn: *Conn = @ptrCast(@alignCast(arg.?));
-        if (conn.role != .writer) return 1;
+        var written: u32 = 0;
+        for (0..conn.nmembers) |m| written += @intFromBool(conn.write_locked[m]);
+        // A reader commits only what touches no member: TEMP tables.
+        if (conn.role != .writer) return @intFromBool(written != 0);
         fault.event("commit-hook");
         conn.in_commit = true;
         conn.any_commit_frame = false;
-        var written: u32 = 0;
-        for (0..conn.nmembers) |m| written += @intFromBool(conn.write_locked[m]);
         conn.cross = written >= 2;
         conn.log("commit hook written={d}", .{written});
         const marked = conn.marker_pending;
@@ -2225,6 +2227,33 @@ pub const Conn = struct {
         conn.in_commit = false;
     }
 
+    /// Before `VACUUM` of one member on this writer. `sqlite3RunVacuum`
+    /// commits through the b-tree layer, so the commit hook never runs:
+    /// approve the commit here as a single-file one, so the frame guard
+    /// accepts its commit frame and the publication window opens as for any
+    /// solo commit. Its `ATTACH` of `vacuum_db` bypasses the authorizer.
+    /// `VACUUM INTO` writes only its output file, which is no member, so it
+    /// needs only the bypass (`commits = false`). Call `endVacuum` once the
+    /// statement has run.
+    pub fn beginVacuum(conn: *Conn, commits: bool) Error!void {
+        if (conn.role != .writer) return error.Sqlite;
+        if (conn.isBroken()) return error.Broken;
+        conn.internal = true;
+        if (!commits) return;
+        conn.in_commit = true;
+        conn.cross = false;
+        conn.any_commit_frame = false;
+    }
+
+    /// After `beginVacuum`. Phase two has ended a commit that finished;
+    /// end one the statement stopped before or during its commit.
+    pub fn endVacuum(conn: *Conn) void {
+        conn.internal = false;
+        if (!conn.in_commit) return;
+        if (conn.window_open) conn.closeWindow();
+        conn.in_commit = false;
+    }
+
     /// Commit the open write transaction. A transaction that writes two or
     /// more members first records its number and member set (its commit
     /// marker) in each of them.
@@ -2272,6 +2301,19 @@ pub const Conn = struct {
     pub fn isBroken(conn: *const Conn) bool {
         const page = conn.snap orelse return false;
         return @atomicLoad(u32, &page.broken, .seq_cst) != 0;
+    }
+
+    /// A writer's publication window is open now: the seqlock is odd.
+    pub fn windowOpen(conn: *const Conn) bool {
+        const page = conn.snap orelse return false;
+        return @atomicLoad(u64, &page.seq, .seq_cst) & 1 != 0;
+    }
+
+    /// A handle, this one or another, holds the writer role now.
+    pub fn writerPresent(conn: *Conn) bool {
+        // A writer must not probe `-live`: flock on the fd it holds
+        // exclusively would downgrade its own lock.
+        return conn.role == .writer or conn.writerLive();
     }
 
     /// Run one statement as its own transaction. A statement that writes

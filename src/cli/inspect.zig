@@ -33,7 +33,7 @@ const inspectErrorFormat = @import("render.zig").inspectErrorFormat;
 const isValidCliVectorName = @import("common.zig").isValidCliVectorName;
 const lowerHexAlloc = @import("common.zig").lowerHexAlloc;
 const max_list_limit = @import("common.zig").max_list_limit;
-const openDatabase = @import("common.zig").openDatabase;
+const openInspectionDatabase = @import("common.zig").openInspectionDatabase;
 const openErrorFormat = @import("render.zig").openErrorFormat;
 const parseBoundedCommandArgs = @import("parse.zig").parseBoundedCommandArgs;
 const parseGraphNeighborsCommandArgs = @import("parse.zig").parseGraphNeighborsCommandArgs;
@@ -101,7 +101,7 @@ pub fn infoCommand(
     const path = try allocator.dupeSentinel(u8, raw_path, 0);
     defer allocator.free(path);
 
-    var db = openDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "info", format, err);
+    var db = openInspectionDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "info", format, err);
     defer db.deinit();
 
     var summary = try loadDatabaseSummary(allocator, &db, path);
@@ -151,7 +151,7 @@ pub fn statsCommand(
     const path = try allocator.dupeSentinel(u8, raw_path, 0);
     defer allocator.free(path);
 
-    var db = openDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "stats", format, err);
+    var db = openInspectionDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "stats", format, err);
     defer db.deinit();
 
     var summary = try loadStatsSummary(allocator, &db, path, limit);
@@ -175,7 +175,7 @@ pub fn objectsCommand(
     const path = try allocator.dupeSentinel(u8, parsed.path, 0);
     defer allocator.free(path);
 
-    var db = openDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "objects", parsed.format, err);
+    var db = openInspectionDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "objects", parsed.format, err);
     defer db.deinit();
 
     var list = try loadObjectList(allocator, &db, parsed.limit);
@@ -201,7 +201,7 @@ pub fn objectCommand(
     const path = try allocator.dupeSentinel(u8, parsed.path, 0);
     defer allocator.free(path);
 
-    var db = openDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "object", parsed.format, err);
+    var db = openInspectionDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "object", parsed.format, err);
     defer db.deinit();
 
     var detail = loadObjectDetail(allocator, &db, id, parsed.limit) catch |err| return inspectErrorFormat(stderr, "object", parsed.format, err);
@@ -225,7 +225,7 @@ pub fn chunksCommand(
     const path = try allocator.dupeSentinel(u8, parsed.path, 0);
     defer allocator.free(path);
 
-    var db = openDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "chunks", parsed.format, err);
+    var db = openInspectionDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "chunks", parsed.format, err);
     defer db.deinit();
 
     var list = try loadChunkList(allocator, &db, parsed.limit);
@@ -251,7 +251,7 @@ pub fn chunkCommand(
     const path = try allocator.dupeSentinel(u8, parsed.path, 0);
     defer allocator.free(path);
 
-    var db = openDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "chunk", parsed.format, err);
+    var db = openInspectionDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "chunk", parsed.format, err);
     defer db.deinit();
 
     var detail = loadChunkDetail(allocator, &db, id, parsed.limit) catch |err| return inspectErrorFormat(stderr, "chunk", parsed.format, err);
@@ -275,7 +275,7 @@ pub fn vectorsCommand(
     const path = try allocator.dupeSentinel(u8, parsed.path, 0);
     defer allocator.free(path);
 
-    var db = openDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "vectors", parsed.format, err);
+    var db = openInspectionDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "vectors", parsed.format, err);
     defer db.deinit();
 
     var list = try loadVectorCollectionList(allocator, &db, parsed.limit);
@@ -304,7 +304,7 @@ pub fn vectorCollectionCommand(
     const path = try allocator.dupeSentinel(u8, parsed.path, 0);
     defer allocator.free(path);
 
-    var db = openDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "vector-collection", parsed.format, err);
+    var db = openInspectionDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "vector-collection", parsed.format, err);
     defer db.deinit();
 
     var detail = loadVectorCollectionDetail(allocator, &db, name, parsed.limit) catch |err| return vectorInspectErrorFormat(stderr, "vector-collection", parsed.format, err);
@@ -328,7 +328,7 @@ pub fn graphsCommand(
     const path = try allocator.dupeSentinel(u8, parsed.path, 0);
     defer allocator.free(path);
 
-    var db = openDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "graphs", parsed.format, err);
+    var db = openInspectionDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "graphs", parsed.format, err);
     defer db.deinit();
 
     var list = try db.listGraphs(allocator);
@@ -356,7 +356,7 @@ pub fn graphCommand(
     const path = try allocator.dupeSentinel(u8, parsed.path, 0);
     defer allocator.free(path);
 
-    var db = openDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "graph", parsed.format, err);
+    var db = openInspectionDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "graph", parsed.format, err);
     defer db.deinit();
 
     var info = db.graphInfo(allocator, graph_name) catch |err| return graphInspectErrorFormat(stderr, "graph", parsed.format, err);
@@ -380,7 +380,7 @@ pub fn graphNodeCommand(
     const path = try allocator.dupeSentinel(u8, parsed.path, 0);
     defer allocator.free(path);
 
-    var db = openDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "graph-node", parsed.format, err);
+    var db = openInspectionDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "graph-node", parsed.format, err);
     defer db.deinit();
 
     var node = db.getGraphNode(allocator, parsed.graph_name, parsed.node_id) catch |err| return graphInspectErrorFormat(stderr, "graph-node", parsed.format, err);
@@ -404,7 +404,7 @@ pub fn graphNeighborsCommand(
     const path = try allocator.dupeSentinel(u8, parsed.path, 0);
     defer allocator.free(path);
 
-    var db = openDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "graph-neighbors", parsed.format, err);
+    var db = openInspectionDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "graph-neighbors", parsed.format, err);
     defer db.deinit();
 
     const requested_limit = if (parsed.limit == std.math.maxInt(usize)) parsed.limit else parsed.limit + 1;
@@ -439,7 +439,7 @@ pub fn graphWalkCommand(
     const path = try allocator.dupeSentinel(u8, parsed.path, 0);
     defer allocator.free(path);
 
-    var db = openDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "graph-walk", parsed.format, err);
+    var db = openInspectionDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "graph-walk", parsed.format, err);
     defer db.deinit();
 
     const requested_limit = if (parsed.limit == std.math.maxInt(usize)) parsed.limit else parsed.limit + 1;
@@ -474,7 +474,7 @@ pub fn tablesCommand(
     const path = try allocator.dupeSentinel(u8, parsed.path, 0);
     defer allocator.free(path);
 
-    var db = openDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "tables", parsed.format, err);
+    var db = openInspectionDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "tables", parsed.format, err);
     defer db.deinit();
 
     var list = try loadTableList(allocator, &db, parsed.limit);

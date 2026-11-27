@@ -31,8 +31,23 @@ pub fn runDiagnostics(allocator: std.mem.Allocator, db: *zova.Database, issue_li
     try validateLooseChunks(allocator, db, &report, &issues);
     try validateVectors(allocator, db, &report, &issues);
     try validateGraphs(allocator, db, &report, &issues);
+    try validateCommitProtocol(allocator, db, &report, &issues);
     report.issues = try issues.toOwnedSlice(allocator);
     return report;
+}
+
+/// Report a CWAL set's state, and a torn or broken set as an issue. Nothing
+/// is repaired: a reader cannot, and the set's writer rolls back a torn
+/// commit when it opens.
+fn validateCommitProtocol(allocator: std.mem.Allocator, db: *zova.Database, report: *DiagnosticReport, issues: *std.ArrayList(DiagnosticIssue)) !void {
+    const state = try db.cwalState() orelse return;
+    report.commit_protocol = state;
+    if (state.broken) {
+        try addDiagnosticIssue(allocator, report, issues, .sqlite, "cwal_set_broken", "a handle rolled back a cross-file commit after a member published; close every handle of the set, then reopen it", null, null, null, null);
+    }
+    if (state.torn) {
+        try addDiagnosticIssue(allocator, report, issues, .sqlite, "cwal_torn_commit", "a member's commit marker names a cross-file commit that another member it lists has not reached", null, null, null, null);
+    }
 }
 
 fn collectObjectStorageStats(allocator: std.mem.Allocator, db: *zova.Database, report: *DiagnosticReport) !void {

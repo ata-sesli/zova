@@ -303,6 +303,90 @@ pub fn isWriter(conn: *Conn) bool {
     return conn.role == .writer;
 }
 
+/// Before `VACUUM` of main (`into = false`), which CWAL then commits as a
+/// single-file commit, or `VACUUM INTO` (`into = true`), which writes only
+/// its output file, on this handle (§6). A reader writes neither:
+/// `ReadOnly`. Call `endVacuum` once the statement has run.
+pub fn beginVacuum(conn: *Conn, into: bool) Error!void {
+    if (!available) unreachable;
+    if (conn.role != .writer) return error.ReadOnly;
+    conn.beginVacuum(!into) catch |err| return mapError(err);
+}
+
+pub fn endVacuum(conn: *Conn) void {
+    if (!available) unreachable;
+    conn.endVacuum();
+}
+
+/// One member's commit marker (row 0 of its `_zova_cwal_marker`): the last
+/// cross-file commit that wrote the member, and that commit's members (bit
+/// `i` is member `i`).
+pub const MemberState = struct {
+    schema: [:0]const u8,
+    marker_txn: i64,
+    marker_mask: i64,
+};
+
+/// What one handle sees of its set, for `check --deep` and `doctor` (§6).
+pub const State = struct {
+    /// This handle is the set's writer.
+    writer: bool,
+    /// A handle, this one or another, holds the writer role.
+    writer_present: bool,
+    /// A writer's publication window is open: the shared seqlock is odd.
+    window_open: bool,
+    /// A writer rolled back after a member published; the set opens again
+    /// only after every handle closes.
+    broken: bool,
+    /// A member's marker names a cross-file commit that another member it
+    /// lists has not reached.
+    torn: bool,
+    member_count: usize,
+    members: [max_set_members]MemberState,
+
+    pub fn memberSlice(self: *const State) []const MemberState {
+        return self.members[0..self.member_count];
+    }
+};
+
+/// The set's state through `conn`. The caller holds a read of every member
+/// at one commit, so the markers agree with each other.
+pub fn setState(conn: *Conn) Error!State {
+    if (!available) unreachable;
+    var result: State = .{
+        .writer = conn.role == .writer,
+        .writer_present = conn.writerPresent(),
+        .window_open = conn.windowOpen(),
+        .broken = conn.isBroken(),
+        .torn = false,
+        .member_count = conn.nmembers,
+        .members = undefined,
+    };
+    var db = connection(conn);
+    for (conn.schemas[0..conn.nmembers], result.members[0..conn.nmembers]) |schema, *member| {
+        var sql_buffer: [128]u8 = undefined;
+        const sql = std.fmt.bufPrintSentinel(&sql_buffer, "select txn, mask from {s}._zova_cwal_marker where k = 0", .{schema}, 0) catch unreachable;
+        var stmt = try db.prepare(sql);
+        defer stmt.deinit();
+        if (try stmt.step() != .row) return error.CommitSetNeedsRepair;
+        member.* = .{ .schema = schema, .marker_txn = stmt.columnInt64(0), .marker_mask = stmt.columnInt64(1) };
+    }
+    result.torn = markersTorn(result.memberSlice());
+    return result;
+}
+
+/// A cross-file commit writes its marker into every member it lists, so a
+/// listed member with an older marker never got that commit.
+pub fn markersTorn(members: []const MemberState) bool {
+    for (members) |member| {
+        for (members, 0..) |other, index| {
+            const listed = (member.marker_mask >> @intCast(index)) & 1 != 0;
+            if (listed and other.marker_txn < member.marker_txn) return true;
+        }
+    }
+    return false;
+}
+
 /// Transition steps, for tests that stop a transition where a crash could
 /// (`test_stop`). A stopped transition leaves its durable state as it is and
 /// sets its connection not to checkpoint on close, like a killed process.

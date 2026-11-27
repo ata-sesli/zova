@@ -276,13 +276,13 @@ can checkpoint a torn commit when it closes. These connections are:
 | Operation | Today | On a CWAL set |
 |---|---|---|
 | `backupTo` / `zova backup` | Backup API main→main under a held read snapshot, then stores copied in by SQL and their rows deleted (`zova.zig:1716-1728`, `2757-2804`) | Hold one CWAL `beginRead` across the main copy and the store copies, so the backup is cross-file consistent (an improvement on WAL today). The output is a single file: drop `_zova_cwal_marker` and the CWAL meta key in the destination. |
-| `compactTo` | `VACUUM INTO`, then stores copied in (`zova.zig:1757-1781`) | `VACUUM INTO` cannot run inside a transaction, so hold the CWAL writer lock for the whole operation, which stops commits during it. Internal bypass for `VACUUM INTO` (it writes only the destination). Drop the marker table in the output. |
+| `compactTo` | `VACUUM INTO`, then stores copied in (`zova.zig:1757-1781`) | `VACUUM INTO` cannot run inside a transaction, so it runs on the writer handle, the set's one writer: no other commit can land between the main copy and the store copies. Internal bypass for `VACUUM INTO` (it writes only the destination). Drop the marker table in the output. A reader returns `ReadOnly`. |
 | `vacuum` (in place, main only) | Plain `VACUUM` (`zova.zig:1312`) | Run as the writer, with the authorizer suspended and the commit marked approved as a single-file commit, so the frame guard accepts it and the solo publication window still opens. Needs a dedicated test: VACUUM skips the commit hook. |
 | `reclaimSpace` | `incremental_vacuum` per member, one immediate transaction per step | Unchanged: each step is a single-file commit through the normal path. |
 | `checkpoint` | `sqlite3_wal_checkpoint_v2` per schema | Allowed on the writer handle outside a commit. On a reader handle it returns busy (checkpoint gate), so the docs say to checkpoint from the writer. |
-| `setJournalMode` | Switches every member together | Refused on a CWAL set unless the mode is `wal`. Leaving WAL requires disabling CWAL first (§7). |
-| `migrate` | Copy-forward, stores first and main last (`zova.zig:667-808`) | The lock connection is a CWAL writer handle, so no commit happens during the copy. Sources are read through CWAL readers or read-only connections. The output set is a new set: it keeps CWAL mode, with fresh markers and epoch 1. Leftover `-wal`/`-shm` handling in `migration_publication.zig:125-140` also covers the `-cwal-*` sidecars. |
-| `bind` / `unbind` / `split` | `bind` writes store meta and main's row as separate autocommit statements (`zova.zig:2841-2848`) | Needs the set open alone and clean (§3). `bind` becomes one CWAL transaction: marker table and meta in the store, row in main. `ATTACH`/`DETACH` use the internal bypass. |
+| `setJournalMode` | Switches every member together | `wal` changes nothing and returns the modes; another mode returns `Misuse`. Leaving WAL requires disabling CWAL first (§7). A reader returns `ReadOnly`. |
+| `migrate` | Copy-forward, stores first and main last (`zova.zig:667-808`) | The lock connection is a CWAL writer handle, so no commit happens during the copy. Sources are read through CWAL readers or read-only connections. The output set is a new set: it keeps CWAL mode, with fresh markers and epoch 1. Leftover `-wal`/`-shm` handling in `migration_publication.zig:125-140` also covers the `-cwal-*` sidecars. Applies from the next format change; while format 15 is current, a CWAL source returns `NoMigrationPath` (phase 5). |
+| `bind` / `unbind` / `split` | `bind` writes store meta and main's row as separate autocommit statements (`zova.zig:2841-2848`) | `Misuse` on a CWAL handle (decision 10): disable CWAL, change the members, enable again. |
 | `validate`, `check --deep`, `doctor` | Read-only checks per schema | Also report CWAL state per member (marker, seqlock parity, broken flag, writer present), and run inside one `beginRead`. `doctor` reports a torn or broken set; it does not repair it. |
 | `salvage` | Read-only source, new destination | On a set that refuses to open, salvage opens members read-only one at a time and reports which members hold the newest marker. The destination is not CWAL. |
 | Fresh-build sessions | `beginImmediate` + commit | Commit through the CWAL path (§4). Usually main only, so single-file. |
@@ -764,7 +764,8 @@ authorizer layer are in place in `-Dexperimental-cwal` builds.
   Registration lifts `query_only` to create its TEMP generation table
   (`extension_operations.zig`, `begin`), and that autocommit `CREATE TEMP
   TABLE` is a write commit, which the reader's commit hook refuses. The
-  writer opens and registers normally. Not fixed (phase 5).
+  writer opens and registers normally. Not fixed (phase 5). Fixed in
+  phase 5: see its status.
 - Known limits, each with its cause and what to do instead:
   - Raw SQL `BEGIN IMMEDIATE` … `COMMIT` on the writer is refused, even for
     a write to one table. `BEGIN IMMEDIATE` write-locks every member, so the
@@ -779,7 +780,120 @@ authorizer layer are in place in `-Dexperimental-cwal` builds.
   - A reader refuses every write commit, including one that wrote only
     TEMP tables: the commit hook refuses any commit on a reader before it
     checks which files were written. Write TEMP tables on a writer handle.
+    Fixed in phase 5.
 5. **Maintenance.** The §6 table, one operation at a time.
+
+**Phase 5 status (2026-11-27).** The maintenance operations of the Zig API
+are handled on a CWAL set in `-Dexperimental-cwal` builds. The CLI
+diagnostics and salvage rows are not done (below).
+
+- Operations, each with its test in `src/database_cwal_set_tests.zig`
+  unless noted:
+  - `checkpoint`: no change was needed. The writer copies every frame of
+    both members; on a reader the checkpoint gate refuses, so each member
+    reports `busy` with no frames copied, for `passive` and `truncate`.
+  - `reclaimSpace`: no change was needed. Each step is a single-file commit
+    through the coordinator; the writer releases main's free pages, and a
+    reader returns `ReadOnly` (its `query_only`).
+  - `setJournalMode`: `wal` changes nothing and returns the modes;
+    `delete`, `truncate` and `persist` return `Misuse`; a reader returns
+    `ReadOnly` for every mode, as a plain read-only handle does. Before,
+    every mode failed with `SqliteError` (the authorizer's `journal_mode`
+    denial).
+  - `vacuum` (main only): `Database.vacuum` on the writer calls CWAL's
+    `beginVacuum`, which lets `VACUUM`'s `ATTACH` past the authorizer and
+    marks its commit approved as single-file (`in_commit`, not cross), so
+    the frame guard accepts the commit frame and the solo publication
+    window opens and closes at phase two; `endVacuum` clears the bypass and
+    ends a commit the statement stopped before or during. The test frees
+    pages, vacuums with a reader open, and checks: one commit counted, no
+    window left open, no free pages, every earlier cross-file commit whole
+    for the reader, a later cross-file commit (`VACUUM` may move the marker
+    table; markers are read from `sqlite_schema` each time), and a clean
+    reopen with both members passing `integrity_check`. A reader returns
+    `ReadOnly`; inside a transaction SQLite's own refusal (`SqliteError`)
+    leaves the next commit working. With the approval removed, the test
+    fails with `SqliteError` (frame guard). Raw SQL `VACUUM` stays refused.
+  - `compactTo`: on the writer, `beginVacuum` without the commit approval
+    lets `VACUUM INTO` attach its output; it writes only that file. The
+    stores are copied in from the same handle, and no other handle can
+    commit, so the copy is one state of the set. The output then gets the
+    backup's treatment: `application_id` cleared, main's marker table and
+    protocol key removed. A reader returns `ReadOnly`, as a plain read-only
+    handle does (`pragma auto_vacuum`); `VACUUM INTO` cannot run inside the
+    read that would hold the members at one commit.
+  - `migrateDatabase`: a CWAL source returns `NoMigrationPath` in CWAL
+    builds, as a plain current-format source does (format 15 is current),
+    and `UnsupportedZovaVersion` in other builds. Nothing is written. The
+    copy-forward design in §6 applies from the next format change.
+  - Fresh-build sessions (`src/c_api_internal_tests.zig`, `test-c-api`):
+    no change was needed. A session opened through the C ABI that loads
+    table rows into main and vectors into the bound store commits once,
+    with a new marker in both members (mask `0b11`).
+  - `bind`, `unbind`, `split`: `Misuse` since phase 3 (decision 10); the
+    §6 row now says so.
+- Reader commits of TEMP tables: the commit hook counts the members a
+  commit write-locked before it checks the role, and lets a reader commit
+  when that count is zero. A reader's write to a member still takes the
+  member's WAL write lock and is refused. The extension test now opens a
+  reader with a plugin that registers SQL, runs its function, and gets
+  `ReadOnly` for `createGraph`; without the fix it fails as before.
+  Phase 4's third known limit is gone.
+- CLI, with a `-Dexperimental-cwal` build on a closed CWAL set: `info`,
+  `check`, `check --deep`, `doctor`, `salvage --dry-run` and `salvage`
+  report the same as on the equal plain WAL set (except the marker table
+  and WAL size); `backup`, `compact` (failed with `SqliteError` before this
+  phase) and `reclaim` succeed. The `salvage`, `backup` and `compact`
+  outputs pass `zova check` and carry no `application_id`, marker table
+  or protocol key.
+- CLI inspection (`validate`, `check --deep`, `doctor` row; `tests/cli.zig`).
+  Before, `info`, `check` and `doctor` opened read-write, so while another
+  process had the writer they failed with `Busy` (shown by holding
+  `-cwal-writer`), and on a closed set they took the writer role from the
+  application for as long as they ran.
+  - `zova.probeCommitProtocol` reads main's raw flag. The CLI's read-only
+    commands (`info` and the other inspection listings, `check`, `doctor`,
+    `backup`) open a CWAL set read-only, as a reader; other sets open as
+    before. `compact` and `reclaim` keep the writer.
+  - `check` and `doctor` run inside one `db.begin()` on a CWAL set, so
+    `quick_check`, the summary and every diagnostic read the members at one
+    commit; the read is rolled back.
+  - `Database.cwalState` (experimental) returns the handle's role, whether
+    a writer is present (`-live`), the seqlock parity (`window_open`), the
+    broken flag, and each member's marker; `torn` is set when a member's
+    marker lists a member whose marker is older. The seqlock, broken flag
+    and writer are set-wide, so they are reported once; the markers per
+    member.
+  - A torn set does not reach the checks: CWAL's open recovery rolls back
+    a torn commit still in the WAL (as any first open of the set does,
+    `doctor` included), and refuses one already checkpointed with
+    `CommitSetNeedsRepair`, which `doctor` reports with exit 3, leaving
+    the files as they are. `torn` in an open set's state can only come
+    from a protocol bug; `markersTorn` has its own unit test.
+  - `check --deep` and `doctor` report it as `commit_protocol` (JSON) and
+    `commit_protocol: cwal` / `cwal_*` lines (text), only on a CWAL set; a
+    plain set's report is unchanged. A broken set or torn markers add a
+    `sqlite`-area issue (`cwal_set_broken`, `cwal_torn_commit`), so the
+    command exits 4. `doctor` repairs nothing.
+  - Tests: with an in-process writer open, `info`, `check`,
+    `check --deep --json`, `doctor` (JSON and text) and `backup` exit 0 and
+    the writer still commits afterwards; after it closes, `doctor` reports
+    `writer_present: false` and still opens as a reader. A store whose
+    marker was lowered with plain SQLite (a checkpointed torn commit)
+    makes `doctor` exit 3 with `CommitSetNeedsRepair`, both files
+    unchanged. A plain set's reports have no `commit_protocol`.
+    `src/database_cwal_set_tests.zig` checks `cwalState` on a reader and
+    the writer, null on a plain handle, `probeCommitProtocol`, and
+    `markersTorn`. With the reader open disabled, the CLI test fails with
+    `Busy`.
+- Not done:
+  - `extension list` / `info` and the extension-inspection fallback of
+    `check` and `doctor` still open read-write, so they get `Busy` beside
+    a live writer.
+  - `salvage` of a set that refuses to open (members one at a time,
+    reporting the newest marker).
+  - The `-cwal-*` sidecars in migration publication: no CWAL set is
+    migrated until the next format.
 6. **C ABI and bindings.** §10, with ABI and format decisions approved
    first.
 7. **Qualification.**

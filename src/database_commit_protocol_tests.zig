@@ -165,7 +165,8 @@ test "a CWAL set is refused before SQLite opens it, and its files stay unchanged
         try std.testing.expectError(error.UnsupportedZovaVersion, Database.openWithOptions(main_path, .{ .read_only = true }));
     }
     try std.testing.expectError(error.UnsupportedZovaVersion, zova.openForLogicalInspection(main_path));
-    try std.testing.expectError(error.UnsupportedZovaVersion, zova.migrateDatabase(main_path, dest_path, .{}));
+    // A CWAL build reads it as a current-format set, which needs no migration.
+    try std.testing.expectError(if (cwal_available) error.NoMigrationPath else error.UnsupportedZovaVersion, zova.migrateDatabase(main_path, dest_path, .{}));
     try std.testing.expect(!fileExists(dest_path));
 
     const main_after = try readFileAlloc(main_path);

@@ -9,6 +9,7 @@ pub const Error = zova.Error;
 pub const FormatCompatibility = zova.FormatCompatibility;
 pub const DatabaseFormatInfo = zova.DatabaseFormatInfo;
 pub const probeDatabaseFormat = zova.probeDatabaseFormat;
+pub const probeCommitProtocol = zova.probeCommitProtocol;
 pub const CreateOptions = zova.CreateOptions;
 pub const Object = zova.Object;
 pub const ObjectChunk = zova.ObjectChunk;

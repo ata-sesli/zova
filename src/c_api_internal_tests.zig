@@ -3719,3 +3719,94 @@ test "c abi object compression is a per-handle setting validated at the boundary
     try std.testing.expectEqual(zova_status.OK, zova_object_set_compression(&.{ .db = db, .compression = @backingInt(zova_object_compression.NONE) }));
     try std.testing.expectEqual(zova.ObjectCompression.none, handle.db.objectCompression());
 }
+
+test "c abi fresh build on a CWAL set commits main and the store with one marker" {
+    if (!@import("database/cwal_set.zig").available) return error.SkipZigTest;
+    const testingDbPath = @import("zova_test_support.zig").testingDbPath;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "main.zova");
+    const store_path = try testingDbPath(&store_buffer, tmp.sub_path[0..], "vectors.zova");
+    try zova.createVectorStore(store_path);
+    {
+        var setup = try zova.Database.create(main_path);
+        defer setup.deinit();
+        try setup.bindVectorStore(store_path);
+        _ = try setup.setJournalMode(.wal);
+        try setup.exec("create table records(id integer primary key, body text not null)");
+    }
+    {
+        var setup = try zova.Database.open(main_path);
+        defer setup.deinit();
+        try setup.setCommitProtocol(.cwal);
+    }
+
+    var db: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_open(&.{ .path = main_path, .out_db = &db, .out_error_message = null }));
+    defer _ = zova_database_close(db);
+    const handle = databaseHandleRaw(db).?;
+    try std.testing.expectEqual(zova.Database.CommitProtocol.cwal, handle.db.commitProtocol());
+    try std.testing.expectEqual(zova_status.OK, zova_vector_collection_create(&.{
+        .db = db,
+        .name = "embedding",
+        .options = .{ .dimensions = 2, .metric = 0, .element_type = 2 },
+    }));
+    const marker_sql = [_][:0]const u8{ "select txn, mask from main._zova_cwal_marker", "select txn, mask from vector_store._zova_cwal_marker" };
+    var before: [2]i64 = undefined;
+    for (marker_sql, 0..) |sql, i| {
+        var stmt = try handle.db.sqlite_db.prepare(sql);
+        defer stmt.deinit();
+        try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
+        before[i] = stmt.columnInt64(0);
+    }
+
+    var build: ?*zova_fresh_build = null;
+    try std.testing.expectEqual(zova_status.OK, zova_fresh_build_begin(&.{ .db = db, .out_build = &build }));
+    defer zova_fresh_build_destroy(build);
+    const columns = [_]?[*:0]const u8{ "id", "body" };
+    const values = [_]zova_fresh_value{
+        .{ .value_type = 1, .int64_value = 1, .float64_value = 0, .bytes = null, .bytes_len = 0 },
+        .{ .value_type = 3, .int64_value = 0, .float64_value = 0, .bytes = "first", .bytes_len = 5 },
+    };
+    try std.testing.expectEqual(zova_status.OK, zova_fresh_build_table_rows(&.{
+        .build = build,
+        .table_name = "records",
+        .column_names = &columns,
+        .column_count = columns.len,
+        .values = &values,
+        .row_count = 1,
+    }));
+    const vector_values = [_]i8{ 3, 4 };
+    const vectors = [_]zova_vector_input{.{
+        .id = "first",
+        .values = .{ .element_type = 2, .f32_values = null, .f16_values = null, .i8_values = &vector_values, .values_len = vector_values.len },
+    }};
+    try std.testing.expectEqual(zova_status.OK, zova_fresh_build_vectors(&.{ .build = build, .collection_name = "embedding", .vectors = &vectors, .vectors_len = 1 }));
+    try std.testing.expectEqual(zova_status.OK, zova_fresh_build_finish(&.{
+        .build = build,
+        .out_node_keys = null,
+        .out_node_keys_capacity = 0,
+        .out_edge_keys = null,
+        .out_edge_keys_capacity = 0,
+        .out_profile = null,
+    }));
+
+    for (marker_sql, 0..) |sql, i| {
+        var stmt = try handle.db.sqlite_db.prepare(sql);
+        defer stmt.deinit();
+        try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
+        try std.testing.expect(stmt.columnInt64(0) > before[i]);
+        try std.testing.expectEqual(@as(i64, 0b11), stmt.columnInt64(1));
+    }
+    {
+        var rows = try handle.db.sqlite_db.prepare("select count(*) from records");
+        defer rows.deinit();
+        try std.testing.expectEqual(sqlite.Step.row, try rows.step());
+        try std.testing.expectEqual(@as(i64, 1), rows.columnInt64(0));
+    }
+    var stored: zova_vector = .{ .id = null, .id_len = 0, .element_type = 0, .f32_values = null, .f16_values = null, .i8_values = null, .values_len = 0 };
+    defer zova_vector_free(&stored);
+    try std.testing.expectEqual(zova_status.OK, zova_vector_get(&.{ .db = db, .collection_name = "embedding", .vector_id = "first", .out_vector = &stored }));
+}

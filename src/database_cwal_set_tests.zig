@@ -516,7 +516,7 @@ test "a backup taken during cross-file commits holds each commit whole" {
     try std.testing.expect(present >= 1);
 }
 
-test "VACUUM on a CWAL handle fails and leaves the set valid" {
+test "raw SQL VACUUM on a CWAL handle fails and leaves the set valid" {
     if (!cwal_set.available) return error.SkipZigTest;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -581,4 +581,260 @@ test "a refused cross-file commit returns Misuse through exec and through a stat
         try std.testing.expect(sqlite.c.sqlite3_get_autocommit(db.sqlite_db.handle) != 0);
         try std.testing.expect(!try expectWhole(&db, 1));
     }
+}
+
+
+fn expectIntegrity(db: *Database) !void {
+    for ([_][:0]const u8{ "pragma main.integrity_check", "pragma vector_store.integrity_check" }) |sql| {
+        var check = try db.sqlite_db.prepare(sql);
+        defer check.deinit();
+        try std.testing.expect(try check.step() == .row);
+        try std.testing.expectEqualStrings("ok", check.columnText(0));
+    }
+}
+
+test "checkpoint copies frames on the writer and reports busy on a reader" {
+    if (!cwal_set.available) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var paths: Paths = .{};
+    try paths.init(&tmp);
+    try createCwalSet(&paths);
+
+    var db = try Database.open(paths.main);
+    defer db.deinit();
+    try db.createVectorCollection("v", .{ .dimensions = 2, .metric = .l2 });
+    try crossCommit(&db, 1);
+    var reader = try Database.openWithOptions(paths.main, .{ .read_only = true });
+    defer reader.deinit();
+
+    for ([_]zova.CheckpointMode{ .passive, .truncate }) |mode| {
+        const refused = try reader.checkpoint(mode);
+        try std.testing.expectEqual(@as(usize, 2), refused.count);
+        for (refused.members()) |member| {
+            try std.testing.expect(member.busy);
+            try std.testing.expectEqual(@as(u64, 0), member.checkpointed_frames);
+        }
+    }
+    const done = try db.checkpoint(.passive);
+    try std.testing.expectEqual(@as(usize, 2), done.count);
+    for (done.members()) |member| {
+        try std.testing.expect(!member.busy);
+        try std.testing.expect(member.wal_frames > 0);
+        try std.testing.expectEqual(member.wal_frames, member.checkpointed_frames);
+    }
+    try std.testing.expect(try expectWhole(&reader, 1));
+}
+
+test "reclaimSpace releases free pages on the writer and is read-only on a reader" {
+    if (!cwal_set.available) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var paths: Paths = .{};
+    try paths.init(&tmp);
+    try createCwalSet(&paths);
+
+    var db = try Database.open(paths.main);
+    defer db.deinit();
+    try db.createVectorCollection("v", .{ .dimensions = 2, .metric = .l2 });
+    try crossCommit(&db, 1);
+    try db.exec("create table big(b)");
+    try db.exec("insert into big values (zeroblob(400000))");
+    try db.exec("drop table big");
+    var reader = try Database.openWithOptions(paths.main, .{ .read_only = true });
+    defer reader.deinit();
+
+    try std.testing.expectError(error.ReadOnly, reader.reclaimSpace(.{}));
+    const result = try db.reclaimSpace(.{});
+    try std.testing.expectEqual(@as(usize, 2), result.count);
+    try std.testing.expect(result.members()[0].pages_released > 0);
+    for (result.members()) |member| try std.testing.expectEqual(@as(u64, 0), member.free_pages_left);
+    try std.testing.expect(try expectWhole(&reader, 1));
+    try crossCommit(&db, 2);
+}
+
+test "setJournalMode on a CWAL set keeps WAL and refuses other modes" {
+    if (!cwal_set.available) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var paths: Paths = .{};
+    try paths.init(&tmp);
+    try createCwalSet(&paths);
+
+    var db = try Database.open(paths.main);
+    defer db.deinit();
+    try db.createVectorCollection("v", .{ .dimensions = 2, .metric = .l2 });
+    var reader = try Database.openWithOptions(paths.main, .{ .read_only = true });
+    defer reader.deinit();
+
+    const report = try db.setJournalMode(.wal);
+    try std.testing.expectEqual(@as(usize, 2), report.count);
+    for (report.members()) |member| try std.testing.expectEqual(zova.JournalMode.wal, member.journal_mode);
+    for ([_]zova.JournalMode{ .delete, .truncate, .persist }) |mode| {
+        try std.testing.expectError(error.Misuse, db.setJournalMode(mode));
+        try std.testing.expectError(error.ReadOnly, reader.setJournalMode(mode));
+    }
+    try std.testing.expectError(error.ReadOnly, reader.setJournalMode(.wal));
+    for ((try db.journalModes()).members()) |member| try std.testing.expectEqual(zova.JournalMode.wal, member.journal_mode);
+    try crossCommit(&db, 1);
+    try std.testing.expect(try expectWhole(&reader, 1));
+}
+
+test "vacuum on the writer rebuilds main as one single-file commit" {
+    if (!cwal_set.available) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var paths: Paths = .{};
+    try paths.init(&tmp);
+    try createCwalSet(&paths);
+
+    {
+        var db = try Database.open(paths.main);
+        defer db.deinit();
+        try db.createVectorCollection("v", .{ .dimensions = 2, .metric = .l2 });
+        for (1..4) |i| try crossCommit(&db, @intCast(i));
+        try db.exec("create table big(b)");
+        try db.exec("insert into big values (zeroblob(400000))");
+        try db.exec("drop table big");
+        var reader = try Database.openWithOptions(paths.main, .{ .read_only = true });
+        defer reader.deinit();
+        try std.testing.expect(try queryCount(&db, "pragma main.freelist_count") > 0);
+
+        try std.testing.expectError(error.ReadOnly, reader.vacuum());
+        // Inside a transaction SQLite refuses VACUUM; the next commit still
+        // goes through the commit hook.
+        try db.begin();
+        try std.testing.expectError(error.SqliteError, db.vacuum());
+        try db.rollback();
+        try crossCommit(&db, 4);
+
+        const conn = db.cwal_conn.?;
+        const commits = conn.stats.commits;
+        try db.vacuum();
+        try std.testing.expectEqual(commits + 1, conn.stats.commits);
+        try std.testing.expect(!conn.in_commit and !conn.window_open);
+        try std.testing.expectEqual(@as(i64, 0), try queryCount(&db, "pragma main.freelist_count"));
+        for (1..5) |i| try std.testing.expect(try expectWhole(&reader, @intCast(i)));
+        // VACUUM may move the marker table: later cross-file commits and
+        // recovery read its root page again.
+        try crossCommit(&db, 5);
+        try std.testing.expect(try expectWhole(&reader, 5));
+    }
+    try expectCwal(&paths);
+    var db = try Database.open(paths.main);
+    defer db.deinit();
+    for (1..6) |i| try std.testing.expect(try expectWhole(&db, @intCast(i)));
+    try expectIntegrity(&db);
+}
+
+test "compactTo on the writer writes a standalone plain copy" {
+    if (!cwal_set.available) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var paths: Paths = .{};
+    try paths.init(&tmp);
+    try createCwalSet(&paths);
+    var out_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const out = try testingDbPath(&out_buffer, tmp.sub_path[0..], "compact.zova");
+    var reader_out_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const reader_out = try testingDbPath(&reader_out_buffer, tmp.sub_path[0..], "reader-compact.zova");
+
+    {
+        var db = try Database.open(paths.main);
+        defer db.deinit();
+        try db.createVectorCollection("v", .{ .dimensions = 2, .metric = .l2 });
+        for (1..3) |i| try crossCommit(&db, @intCast(i));
+        var reader = try Database.openWithOptions(paths.main, .{ .read_only = true });
+        defer reader.deinit();
+        // VACUUM INTO cannot run inside the read that would hold the
+        // members at one commit.
+        try std.testing.expectError(error.ReadOnly, reader.compactTo(reader_out, .{}));
+        try std.testing.expect(std.c.access(reader_out.ptr, 0) != 0);
+
+        try db.compactTo(out, .{});
+        try crossCommit(&db, 3);
+    }
+    try expectCwal(&paths);
+    try std.testing.expect(!try commit_protocol.rawFlagSet(out));
+    var copy = try Database.open(out);
+    defer copy.deinit();
+    try std.testing.expectEqual(Database.CommitProtocol.none, copy.commitProtocol());
+    try std.testing.expect(!try commit_protocol.mainDeclaresProtocol(&copy.sqlite_db));
+    try std.testing.expectEqual(@as(i64, 0), try queryCount(&copy, "select count(*) from sqlite_schema where name = '_zova_cwal_marker'"));
+    try std.testing.expectEqual(@as(i64, 2), try queryCount(&copy, "select count(*) from t"));
+    try std.testing.expect(try copy.hasVector("v", "1"));
+    try std.testing.expect(try copy.hasVector("v", "2"));
+    try std.testing.expect(!try copy.hasVector("v", "3"));
+}
+
+test "migrating a CWAL set finds no migration path" {
+    if (!cwal_set.available) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var paths: Paths = .{};
+    try paths.init(&tmp);
+    try createCwalSet(&paths);
+    var out_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const out = try testingDbPath(&out_buffer, tmp.sub_path[0..], "migrated.zova");
+
+    try std.testing.expectError(error.NoMigrationPath, zova.migrateDatabase(paths.main, out, .{}));
+    try std.testing.expect(std.c.access(out.ptr, 0) != 0);
+    try expectCwal(&paths);
+}
+
+test "markers are torn when a member lists another member with an older marker" {
+    const Member = cwal_set.MemberState;
+    const whole = [_]Member{
+        .{ .schema = "main", .marker_txn = 3, .marker_mask = 0b11 },
+        .{ .schema = "vector_store", .marker_txn = 3, .marker_mask = 0b11 },
+    };
+    try std.testing.expect(!cwal_set.markersTorn(&whole));
+    // A later single-member commit leaves the markers as they were; a later
+    // cross-file commit of other members raises only theirs.
+    const later = [_]Member{
+        .{ .schema = "main", .marker_txn = 5, .marker_mask = 0b101 },
+        .{ .schema = "object_store", .marker_txn = 3, .marker_mask = 0b011 },
+        .{ .schema = "vector_store", .marker_txn = 5, .marker_mask = 0b101 },
+    };
+    try std.testing.expect(!cwal_set.markersTorn(&later));
+    const torn = [_]Member{
+        .{ .schema = "main", .marker_txn = 3, .marker_mask = 0b11 },
+        .{ .schema = "vector_store", .marker_txn = 2, .marker_mask = 0b11 },
+    };
+    try std.testing.expect(cwal_set.markersTorn(&torn));
+}
+
+test "cwalState reports a reader beside the writer, and null on a plain set" {
+    if (!cwal_set.available) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var paths: Paths = .{};
+    try paths.init(&tmp);
+    try createCwalSet(&paths);
+
+    var writer = try Database.open(paths.main);
+    defer writer.deinit();
+    try writer.createVectorCollection("v", .{ .dimensions = 2, .metric = .l2 });
+    try crossCommit(&writer, 1);
+    var reader = try Database.openWithOptions(paths.main, .{ .read_only = true });
+    defer reader.deinit();
+
+    const state = (try reader.cwalState()).?;
+    try std.testing.expect(!state.writer and state.writer_present);
+    try std.testing.expect(!state.window_open and !state.broken and !state.torn);
+    const members = state.memberSlice();
+    try std.testing.expectEqual(@as(usize, 2), members.len);
+    try std.testing.expectEqualStrings("main", members[0].schema);
+    try std.testing.expectEqualStrings("vector_store", members[1].schema);
+    try std.testing.expectEqual(members[0].marker_txn, members[1].marker_txn);
+    try std.testing.expectEqual(@as(i64, 0b11), members[1].marker_mask);
+    try std.testing.expect((try writer.cwalState()).?.writer);
+
+    var plain_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const plain_path = try testingDbPath(&plain_buffer, tmp.sub_path[0..], "plain.zova");
+    var plain = try Database.create(plain_path);
+    defer plain.deinit();
+    try std.testing.expect(try plain.cwalState() == null);
+    try std.testing.expectEqual(Database.CommitProtocol.cwal, try zova.probeCommitProtocol(paths.main));
+    try std.testing.expectEqual(Database.CommitProtocol.none, try zova.probeCommitProtocol(plain_path));
 }

@@ -1717,6 +1717,158 @@ test "cli doctor and check report healthy bound object stores" {
     try std.testing.expect((try jsonObjectInt(check_root, "checked", "objects")) > 0);
 }
 
+/// A main file bound to a vector store, with CWAL enabled and one
+/// cross-file commit, closed. `error.SkipZigTest` in builds without CWAL.
+fn createCwalSet(main_path: [:0]const u8, store_path: [:0]const u8) !void {
+    try zova.createVectorStore(store_path);
+    var db = try zova.Database.create(main_path);
+    defer db.deinit();
+    try db.bindVectorStore(store_path);
+    _ = try db.setJournalMode(.wal);
+    try db.exec("create table t(x)");
+    try db.createVectorCollection("docs", .{ .dimensions = 2, .metric = .l2 });
+    db.setCommitProtocol(.cwal) catch |err| return if (err == error.UnsupportedZovaVersion) error.SkipZigTest else err;
+    try db.begin();
+    try db.exec("insert into t values (1)");
+    try db.putVector("docs", "a", .{ .f32 = &.{ 1, 2 } });
+    try db.commit();
+}
+
+/// The `commit_protocol` object of a check or doctor JSON report on a CWAL
+/// set whose two members both carry the last cross-file commit's marker.
+fn expectCwalReport(root: std.json.ObjectMap, writer_present: bool) !void {
+    const value = root.get("commit_protocol") orelse return error.MissingJsonField;
+    const state = value.object;
+    try expectJsonString(state, "mode", "cwal");
+    try expectJsonString(state, "handle", "reader");
+    try expectJsonBool(state, "writer_present", writer_present);
+    try expectJsonBool(state, "window_open", false);
+    try expectJsonBool(state, "broken", false);
+    try expectJsonBool(state, "torn", false);
+    const members = (state.get("members") orelse return error.MissingJsonField).array.items;
+    try std.testing.expectEqual(@as(usize, 2), members.len);
+    try expectJsonString(members[0].object, "schema", "main");
+    try expectJsonString(members[1].object, "schema", "vector_store");
+    const txn = members[0].object.get("marker_txn").?.integer;
+    try std.testing.expect(txn > 0);
+    for (members) |member| {
+        try expectJsonInt(member.object, "marker_txn", txn);
+        try expectJsonInt(member.object, "marker_mask", 0b11);
+    }
+}
+
+test "cli inspects a CWAL set as a reader beside its writer" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "cwal-main.zova");
+    var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const store_path = try testingDbPath(&store_buffer, tmp.sub_path[0..], "cwal-vectors.zova");
+    var backup_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const backup_path = try testingDbPath(&backup_buffer, tmp.sub_path[0..], "cwal-backup.zova");
+    try createCwalSet(main_path, store_path);
+
+    // The application's handle: the set's only writer.
+    var writer = try zova.Database.open(main_path);
+    var writer_open = true;
+    defer if (writer_open) writer.deinit();
+    try std.testing.expectEqual(zova.Database.CommitProtocol.cwal, writer.commitProtocol());
+
+    var info = try runCli(&.{ "zova", "info", main_path });
+    defer info.deinit();
+    try expectCliCode(&info, 0);
+
+    var check = try runCli(&.{ "zova", "check", main_path });
+    defer check.deinit();
+    try expectCliCode(&check, 0);
+
+    var deep = try runCli(&.{ "zova", "check", "--deep", "--json", main_path });
+    defer deep.deinit();
+    try expectCliCode(&deep, 0);
+    var deep_json = try parseJson(deep.stdout);
+    defer deep_json.deinit();
+    try expectCwalReport(deep_json.value.object, true);
+
+    var doctor = try runCli(&.{ "zova", "doctor", "--json", main_path });
+    defer doctor.deinit();
+    try expectCliCode(&doctor, 0);
+    var doctor_json = try parseJson(doctor.stdout);
+    defer doctor_json.deinit();
+    try expectCwalReport(doctor_json.value.object, true);
+
+    var doctor_text = try runCli(&.{ "zova", "doctor", main_path });
+    defer doctor_text.deinit();
+    try expectCliCode(&doctor_text, 0);
+    try expectContains(doctor_text.stdout, "commit_protocol: cwal\n");
+    try expectContains(doctor_text.stdout, "cwal_writer_present: true\n");
+    try expectContains(doctor_text.stdout, "cwal_member: main marker_txn=");
+
+    var backup = try runCli(&.{ "zova", "backup", main_path, backup_path });
+    defer backup.deinit();
+    try expectCliCode(&backup, 0);
+
+    // None of them took the writer role from the application.
+    try writer.exec("insert into t values (2)");
+    writer.deinit();
+    writer_open = false;
+
+    var closed = try runCli(&.{ "zova", "doctor", "--json", main_path });
+    defer closed.deinit();
+    try expectCliCode(&closed, 0);
+    var closed_json = try parseJson(closed.stdout);
+    defer closed_json.deinit();
+    try expectCwalReport(closed_json.value.object, false);
+}
+
+test "cli check and doctor on a plain set report no commit protocol" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "plain.zova");
+    try createHealthyDatabase(db_path);
+
+    var deep = try runCli(&.{ "zova", "check", "--deep", "--json", db_path });
+    defer deep.deinit();
+    try expectCliCode(&deep, 0);
+    try std.testing.expect(std.mem.indexOf(u8, deep.stdout, "commit_protocol") == null);
+
+    var doctor = try runCli(&.{ "zova", "doctor", db_path });
+    defer doctor.deinit();
+    try expectCliCode(&doctor, 0);
+    try std.testing.expect(std.mem.indexOf(u8, doctor.stdout, "commit_protocol") == null);
+    try std.testing.expect(std.mem.indexOf(u8, doctor.stdout, "cwal_") == null);
+}
+
+test "cli doctor reports a CWAL set with a checkpointed torn commit and leaves it as it is" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "torn-main.zova");
+    var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const store_path = try testingDbPath(&store_buffer, tmp.sub_path[0..], "torn-vectors.zova");
+    try createCwalSet(main_path, store_path);
+
+    // The store forgets the last cross-file commit that main records, as a
+    // checkpoint outside the protocol would leave it: CWAL's open recovery
+    // cannot roll that back, and refuses the set.
+    {
+        var store = try zova.sqlite.Database.openWithFlags(store_path, .read_write);
+        defer store.deinit();
+        try store.exec("update _zova_cwal_marker set txn = txn - 1 where k = 0");
+    }
+    const main_before = try fileSha256(main_path);
+    const store_before = try fileSha256(store_path);
+
+    var doctor = try runCli(&.{ "zova", "doctor", "--json", main_path });
+    defer doctor.deinit();
+    try expectCliCode(&doctor, 3);
+    var doctor_json = try parseJson(doctor.stderr);
+    defer doctor_json.deinit();
+    try expectJsonString(doctor_json.value.object, "error", "CommitSetNeedsRepair");
+    try std.testing.expectEqual(main_before, try fileSha256(main_path));
+    try std.testing.expectEqual(store_before, try fileSha256(store_path));
+}
+
 test "cli doctor and check categorize bound object store marker failures" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

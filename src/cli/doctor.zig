@@ -20,7 +20,9 @@ const isExtensionHealthError = @import("common.zig").isExtensionHealthError;
 const loadDatabaseSummary = @import("inspect.zig").loadDatabaseSummary;
 const writeJournalModesJson = @import("inspect_render.zig").writeJournalModesJson;
 const writeJournalModesText = @import("inspect_render.zig").writeJournalModesText;
-const openDatabase = @import("common.zig").openDatabase;
+const openInspectionDatabase = @import("common.zig").openInspectionDatabase;
+const beginInspectionRead = @import("common.zig").beginInspectionRead;
+const endInspectionRead = @import("common.zig").endInspectionRead;
 const openErrorFormat = @import("render.zig").openErrorFormat;
 const openManagementDatabase = @import("common.zig").openManagementDatabase;
 const parseBoundedCommandArgs = @import("parse.zig").parseBoundedCommandArgs;
@@ -69,7 +71,7 @@ pub fn checkCommand(
     defer allocator.free(path);
 
     var db = open_db: {
-        const opened = openDatabase(ctx, path) catch |err| {
+        const opened = openInspectionDatabase(ctx, path) catch |err| {
             if (deep and isExtensionHealthError(err)) {
                 break :open_db zova.Database.openForExtensionInspectionWithExtensions(path, .{}, ctx.registry) catch |inspect_err| {
                     return openErrorFormat(stderr, "check", format, inspect_err);
@@ -83,6 +85,8 @@ pub fn checkCommand(
         break :open_db opened;
     };
     defer db.deinit();
+    const inspection_read = beginInspectionRead(&db) catch |err| return openErrorFormat(stderr, "check", format, err);
+    defer endInspectionRead(&db, inspection_read);
 
     quickCheck(&db) catch |err| return checkErrorFormat(stderr, "check", format, "sqlite quick_check failed", err);
 
@@ -123,7 +127,7 @@ pub fn doctorCommand(
     defer allocator.free(path);
 
     var db = open_db: {
-        const opened = openDatabase(ctx, path) catch |err| {
+        const opened = openInspectionDatabase(ctx, path) catch |err| {
             if (isExtensionHealthError(err)) {
                 break :open_db zova.Database.openForExtensionInspectionWithExtensions(path, .{}, ctx.registry) catch |inspect_err| {
                     return openErrorFormat(stderr, "doctor", parsed.format, inspect_err);
@@ -135,6 +139,8 @@ pub fn doctorCommand(
         break :open_db opened;
     };
     defer db.deinit();
+    const inspection_read = beginInspectionRead(&db) catch |err| return openErrorFormat(stderr, "doctor", parsed.format, err);
+    defer endInspectionRead(&db, inspection_read);
 
     quickCheck(&db) catch |err| return doctorCheckErrorFormat(stderr, parsed.format, parsed.path, "sqlite quick_check failed", err);
 
@@ -317,6 +323,7 @@ fn writeCheckText(stdout: *std.Io.Writer, report: ?DiagnosticReport) !void {
             deep_report.issue_counts.graph,
             deep_report.severity_counts.errors,
         });
+        try writeCommitProtocolText(stdout, deep_report);
     }
     try stdout.print("status: ok\n", .{});
 }
@@ -380,6 +387,7 @@ fn writeCheckJson(stdout: *std.Io.Writer, report: ?DiagnosticReport) !void {
         try writeDiagnosticSeverityCountsJson(stdout, deep_report.severity_counts);
         try stdout.writeAll(",\n  \"issues_truncated\": false,\n  \"issues\": [],\n  \"suggested_actions\": ");
         try writeSuggestedActionsJson(stdout, "", false);
+        try writeCommitProtocolJson(stdout, deep_report);
     }
     try stdout.writeAll("\n}\n");
 }
@@ -536,6 +544,7 @@ fn writeDoctorText(writer: *std.Io.Writer, source_path: []const u8, summary: Dat
         report.issues_truncated,
     });
     try writeJournalModesText(writer, summary.journal_modes);
+    try writeCommitProtocolText(writer, report);
 
     try writer.writeAll("issues:\n");
     if (report.issues.len == 0) {
@@ -651,5 +660,45 @@ fn writeDoctorJson(writer: *std.Io.Writer, source_path: []const u8, summary: Dat
     try writeJournalModesJson(writer, summary.journal_modes);
     try writer.writeAll(",\n  \"suggested_actions\": ");
     try writeSuggestedActionsJsonForIssues(writer, source_path, has_issues, report.issue_counts);
+    try writeCommitProtocolJson(writer, report);
     try writer.writeAll("\n}\n");
+}
+
+/// The CWAL state of a check or doctor report, on a set in CWAL mode.
+fn writeCommitProtocolText(writer: *std.Io.Writer, report: DiagnosticReport) !void {
+    const state = report.commit_protocol orelse return;
+    try writer.print(
+        \\commit_protocol: cwal
+        \\cwal_handle: {s}
+        \\cwal_writer_present: {}
+        \\cwal_window_open: {}
+        \\cwal_broken: {}
+        \\cwal_torn: {}
+        \\
+    , .{ if (state.writer) "writer" else "reader", state.writer_present, state.window_open, state.broken, state.torn });
+    for (state.memberSlice()) |member| {
+        try writer.print("cwal_member: {s} marker_txn={d} marker_mask={d}\n", .{ member.schema, member.marker_txn, member.marker_mask });
+    }
+}
+
+fn writeCommitProtocolJson(writer: *std.Io.Writer, report: DiagnosticReport) !void {
+    const state = report.commit_protocol orelse return;
+    try writer.print(
+        \\,
+        \\  "commit_protocol": {{
+        \\    "mode": "cwal",
+        \\    "handle": "{s}",
+        \\    "writer_present": {},
+        \\    "window_open": {},
+        \\    "broken": {},
+        \\    "torn": {},
+        \\    "members": [
+    , .{ if (state.writer) "writer" else "reader", state.writer_present, state.window_open, state.broken, state.torn });
+    for (state.memberSlice(), 0..) |member, index| {
+        if (index != 0) try writer.writeByte(',');
+        try writer.writeAll("\n      {\"schema\": ");
+        try writeJsonString(writer, member.schema);
+        try writer.print(", \"marker_txn\": {d}, \"marker_mask\": {d}}}", .{ member.marker_txn, member.marker_mask });
+    }
+    try writer.writeAll("\n    ]\n  }");
 }

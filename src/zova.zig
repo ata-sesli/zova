@@ -112,6 +112,13 @@ pub const DatabaseFormatInfo = @import("database/types.zig").DatabaseFormatInfo;
 /// rejected exactly as `Database.open` rejects them.
 pub const probeDatabaseFormat = @import("database/migration.zig").probeDatabaseFormat;
 
+/// Experimental: the commit protocol a set opens with, from main's raw
+/// header, without SQLite. Sees only checkpointed content, so an enable
+/// that stopped before its checkpoint still probes as `.none`.
+pub fn probeCommitProtocol(path: [:0]const u8) Error!Database.CommitProtocol {
+    return if (try commit_protocol.rawFlagSet(path)) .cwal else .none;
+}
+
 /// Read and classify `_zova_meta.format_version` using the same strict parsing
 /// as `probeDatabaseFormat`, so open and probe cannot disagree.
 const readFormatClassification = @import("database/format.zig").readFormatClassification;
@@ -677,7 +684,9 @@ pub fn migrateDatabaseInternal(
     if (!isZovaPath(source_path)) return error.NotZovaPath;
     if (!isZovaPath(destination_path)) return error.NotZovaPath;
     try ensureSourcePathExists(source_path);
-    try commit_protocol.refuseRawFlag(source_path);
+    // A CWAL set has the current format, so like a plain current file it
+    // needs no migration. A build without CWAL cannot open it.
+    if (try commit_protocol.rawFlagSet(source_path)) return if (cwal_set.available) error.NoMigrationPath else error.UnsupportedZovaVersion;
 
     // Fast classification before touching destinations so unsupported sources
     // are rejected without creating anything.
@@ -1275,6 +1284,19 @@ pub const Database = struct {
         return if (self.cwal_conn != null) .cwal else .none;
     }
 
+    /// State of a CWAL set as one handle sees it (`cwalState`).
+    pub const CwalState = cwal_set.State;
+
+    /// Experimental (`-Dexperimental-cwal`): the CWAL state of the set this
+    /// handle has open, with every member's marker read at one commit. Null
+    /// on a handle whose set is not in CWAL mode.
+    pub fn cwalState(self: *Database) Error!?CwalState {
+        const conn = self.cwal_conn orelse return null;
+        const read_scope = try self.beginRead();
+        defer self.endRead(read_scope);
+        return try cwal_set.setState(conn);
+    }
+
     /// Experimental, in `-Dexperimental-cwal` builds only (otherwise
     /// `UnsupportedZovaVersion`): switch the set this handle has open, main
     /// and its bound stores, to `protocol`, then open it again through this
@@ -1474,7 +1496,12 @@ pub const Database = struct {
     /// Zova never runs `VACUUM` automatically after object or vector deletes.
     /// This method is a thin SQLite wrapper for applications that deliberately
     /// want SQLite to rebuild the database file and potentially shrink it.
+    /// On a CWAL set it rebuilds main only, as one single-file commit, and
+    /// fails with `ReadOnly` on a reader.
     pub fn vacuum(self: *Database) Error!void {
+        const conn = self.cwal_conn orelse return self.exec("vacuum");
+        try cwal_set.beginVacuum(conn, false);
+        defer cwal_set.endVacuum(conn);
         try self.exec("vacuum");
     }
 
@@ -1934,7 +1961,10 @@ pub const Database = struct {
     ///
     /// This is the explicit space-reclaiming copy path. The source database is
     /// not replaced, and the destination must not already exist. The copy uses
-    /// `auto_vacuum = incremental`, so `reclaimSpace` works on it.
+    /// `auto_vacuum = incremental`, so `reclaimSpace` works on it. On a CWAL
+    /// set the copy is a plain standalone file; it needs the writer, the one
+    /// handle no other commit can interleave with, and fails with `ReadOnly`
+    /// on a reader.
     pub fn compactTo(self: *Database, destination_path: [:0]const u8, options: CompactOptions) Error!void {
         try ensureDestinationZovaPathAvailable(destination_path);
         errdefer deleteDestinationFile(destination_path);
@@ -1952,10 +1982,19 @@ pub const Database = struct {
         defer vacuum_stmt.deinit();
 
         try vacuum_stmt.bindText(1, destination_path);
-        try vacuum_stmt.expectDone();
+        {
+            if (self.cwal_conn) |conn| try cwal_set.beginVacuum(conn, true);
+            defer if (self.cwal_conn) |conn| cwal_set.endVacuum(conn);
+            try vacuum_stmt.expectDone();
+        }
         try ProgressCallback.emit(options.progress, .{ .phase = .copy, .member = .main, .done = pages, .total = pages });
 
         try self.inlineBoundStoresIntoDestination(destination_path, options.progress);
+        if (self.cwal_conn != null) {
+            var dest = try sqlite.Database.open(destination_path);
+            defer dest.deinit();
+            try clearCommitProtocol(&dest);
+        }
         if (options.verify) try verifyOperationalCopyReporting(destination_path, self.extension_registry, options.progress);
     }
 
@@ -2003,7 +2042,9 @@ pub const Database = struct {
     /// mode needs the only open handle on each file and fails with `Busy`
     /// otherwise. Fails with `ObjectTransactionActive` inside a transaction,
     /// `ReadOnly` on a read-only handle, and `InvalidArgument` for `wal` on an
-    /// in-memory database. Returns the modes now in effect.
+    /// in-memory database. A CWAL set stays in WAL mode: `wal` changes
+    /// nothing, and another mode fails with `Misuse` (switch the commit
+    /// protocol back first). Returns the modes now in effect.
     pub fn setJournalMode(self: *Database, mode: JournalMode) Error!JournalModeReport {
         if (!mode.selectable()) return error.InvalidArgument;
         if (sqlite.c.sqlite3_get_autocommit(self.sqlite_db.handle) == 0) return error.ObjectTransactionActive;
@@ -2011,6 +2052,11 @@ pub const Database = struct {
         const members = self.journalMembers(&buffer);
         for (members) |member| {
             if (sqlite.c.sqlite3_db_readonly(self.sqlite_db.handle, member.schema.ptr) == 1) return error.ReadOnly;
+        }
+        if (self.cwal_conn) |conn| {
+            if (!cwal_set.isWriter(conn)) return error.ReadOnly;
+            if (mode != .wal) return error.Misuse;
+            return self.journalModes();
         }
         try journal.writeAll(&self.sqlite_db, members, mode);
         return self.journalModes();

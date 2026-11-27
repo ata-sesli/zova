@@ -15,6 +15,7 @@ const formatUsageMessage = @import("parse.zig").formatUsageMessage;
 const free_space = @import("free_space.zig");
 const migrateUsageMessage = @import("parse.zig").migrateUsageMessage;
 const openDatabase = @import("common.zig").openDatabase;
+const openInspectionDatabase = @import("common.zig").openInspectionDatabase;
 const openErrorFormat = @import("render.zig").openErrorFormat;
 const operationalErrorFormat = @import("render.zig").operationalErrorFormat;
 const operationalUsageMessage = @import("parse.zig").operationalUsageMessage;
@@ -475,7 +476,7 @@ pub fn backupCommand(
     const destination = try allocator.dupeSentinel(u8, parsed.destination_path, 0);
     defer allocator.free(destination);
 
-    var db = openDatabase(ctx, source) catch |err| return openErrorFormat(stderr, "backup", parsed.format, err);
+    var db = openInspectionDatabase(ctx, source) catch |err| return openErrorFormat(stderr, "backup", parsed.format, err);
     defer db.deinit();
 
     var reporter = progress_output.Reporter.init(stderr, "backup", progress_output.mode(parsed.format, parsed.progress, ctx.stderr_terminal));

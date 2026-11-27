@@ -679,12 +679,16 @@ test "extension_plugin operation registration on a CWAL reader" {
         defer db.deinit();
         try db.setCommitProtocol(.cwal);
     }
-    try std.testing.expectError(error.ReadOnly, zova.Database.openWithOptionsAndExtensions(main, .{ .read_only = true }, registry));
-    // The writer still opens and registers the operation.
     var db = try zova.Database.openWithOptionsAndExtensions(main, .{}, registry);
     defer db.deinit();
     try std.testing.expectEqual(zova.Database.CommitProtocol.cwal, db.commitProtocol());
     try std.testing.expectEqual(@as(i64, 42), try scalarValue(&db.sqlite_db, "select zova_c_test_plus_one(41)"));
+    // Registration commits only its TEMP table, which a reader may commit;
+    // a write to a member is still refused.
+    var reader = try zova.Database.openWithOptionsAndExtensions(main, .{ .read_only = true }, registry);
+    defer reader.deinit();
+    try std.testing.expectEqual(@as(i64, 42), try scalarValue(&reader.sqlite_db, "select zova_c_test_plus_one(41)"));
+    try std.testing.expectError(error.ReadOnly, reader.createGraph("other"));
 }
 
 test "extension_plugin scalar writes are atomic and read-only operations cannot mutate" {

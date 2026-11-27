@@ -511,6 +511,8 @@ pub const DiagnosticReport = struct {
     missing_object_store: bool = false,
     missing_vector_store: bool = false,
     missing_graph_store: bool = false,
+    /// The set's CWAL state, on a set in CWAL mode.
+    commit_protocol: ?zova.Database.CwalState = null,
 
     pub fn deinit(self: *DiagnosticReport, allocator: std.mem.Allocator) void {
         for (self.issues) |*issue| issue.deinit(allocator);

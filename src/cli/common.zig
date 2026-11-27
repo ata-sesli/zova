@@ -28,6 +28,28 @@ pub fn openDatabase(ctx: CommandContext, path: [:0]const u8) zova.Error!zova.Dat
     return zova.Database.openWithExtensions(path, ctx.registry);
 }
 
+/// Open a database for a command that only reads it. A CWAL set opens as a
+/// reader, so the command runs beside the set's writer and never takes the
+/// writer role from the application.
+pub fn openInspectionDatabase(ctx: CommandContext, path: [:0]const u8) zova.Error!zova.Database {
+    const protocol = zova.probeCommitProtocol(path) catch .none;
+    if (protocol == .cwal) return openDatabaseWithOptions(ctx, path, .{ .read_only = true });
+    return openDatabase(ctx, path);
+}
+
+/// On a CWAL set, start one read of every member, so the checks that follow
+/// see the members at one commit; end it with `endInspectionRead`. Other
+/// sets need no read: false.
+pub fn beginInspectionRead(db: *zova.Database) zova.Error!bool {
+    if (db.commitProtocol() != .cwal) return false;
+    try db.begin();
+    return true;
+}
+
+pub fn endInspectionRead(db: *zova.Database, owns_read: bool) void {
+    if (owns_read) db.rollback() catch {};
+}
+
 pub fn openDatabaseWithOptions(ctx: CommandContext, path: [:0]const u8, options: zova.OpenOptions) zova.Error!zova.Database {
     return zova.Database.openWithOptionsAndExtensions(path, options, ctx.registry);
 }
