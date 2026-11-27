@@ -344,6 +344,34 @@ test "R6: a torn page checkpointed over an earlier WAL copy is rolled back" {
     try std.testing.expect(try integrityOk(conn));
 }
 
+test "a CWAL set syncs with F_FULLFSYNC on Apple platforms" {
+    registerOnce();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var paths: Paths = .{};
+    try createMember(try paths.add(&tmp.sub_path, "main.db"));
+    try createMember(try paths.add(&tmp.sub_path, "s1.db"));
+
+    // Plain fsync on Darwin neither flushes the drive cache nor orders
+    // writes, and the protocol depends on the order syncs reach the disk.
+    const darwin = @import("builtin").os.tag.isDarwin();
+    const conn = try cwal.Conn.open(paths.slice(), writer);
+    try std.testing.expectEqual(@as(i64, @intFromBool(darwin)), try count(conn, "pragma fullfsync"));
+    try std.testing.expectEqual(@as(i64, @intFromBool(darwin)), try count(conn, "pragma checkpoint_fullfsync"));
+    if (darwin) {
+        try std.testing.expectError(error.Sqlite, conn.exec("pragma fullfsync=0"));
+        try std.testing.expectError(error.Sqlite, conn.exec("pragma checkpoint_fullfsync=0"));
+        try std.testing.expectEqual(@as(i64, 1), try count(conn, "pragma fullfsync"));
+    }
+    try crossCommit(conn, 1);
+    conn.close();
+
+    // Plain mode makes no cross-file promise and keeps SQLite's defaults.
+    const plain = try cwal.Conn.open(paths.slice(), .{ .mode = .plain, .role = .writer });
+    defer plain.close();
+    try std.testing.expectEqual(@as(i64, 0), try count(plain, "pragma fullfsync"));
+}
+
 test "plain mode commits across members without the protocol" {
     registerOnce();
     var tmp = std.testing.tmpDir(.{});
