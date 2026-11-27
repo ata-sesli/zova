@@ -1,0 +1,31 @@
+== process crash at every writer event
+  [plain crash] 1/1340 (0s)
+  [plain crash] 863/1340 (5s)
+  [plain crash] 1340/1340 (9s)
+plain: events=1340 runs=1340 failures=135 recoveries={'none': 1205, '-': 135}
+      135  FAIL torn pairs main=# store=#
+  [cwal crash] 1/1678 (0s)
+  [cwal crash] 610/1678 (5s)
+  [cwal crash] 1149/1678 (10s)
+  [cwal crash] 1585/1678 (15s)
+  [cwal crash] 1678/1678 (16s)
+cwal: events=1678 runs=1678 failures=0 recoveries={'none': 1527, 'rollback': 151}
+== crash during recovery (every recovery event, once and twice)
+  [recovery crash] 1/8640 (0s)
+  [recovery crash] 585/8640 (5s)
+  [recovery crash] 1249/8640 (10s)
+  [recovery crash] 1946/8640 (15s)
+  [recovery crash] 2560/8640 (20s)
+  [recovery crash] 3200/8640 (25s)
+  [recovery crash] 3778/8640 (30s)
+  [recovery crash] 4308/8640 (35s)
+  [recovery crash] 4892/8640 (40s)
+  [recovery crash] 5478/8640 (45s)
+  [recovery crash] 6098/8640 (50s)
+  [recovery crash] 6702/8640 (55s)
+  [recovery crash] 7355/8640 (60s)
+  [recovery crash] 7962/8640 (65s)
+  [recovery crash] 8592/8640 (70s)
+  [recovery crash] 8640/8640 (71s)
+cwal: torn states=40 runs=8640 failures=0
+RESULT PASS

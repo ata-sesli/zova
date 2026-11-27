@@ -1,0 +1,3 @@
+== checkpoint starts during a snapshot open (widened race)
+cwal: {'reads': 611, 'mixed': 0, 'broken': 0, 'reopen': 6, 'ckpt_attempts': 24, 'ckpt_denied': 24, 'snapshot_reads': 99, 'seq_retries': 33, 'snapshot_waits': 4, 'ckpt_races': 67, 'ckpt_fallbacks': 67, 'ckpt_violations': 0, 'ckpt_locks': 0, 'min_reads': 611} check_failures=0
+RESULT PASS

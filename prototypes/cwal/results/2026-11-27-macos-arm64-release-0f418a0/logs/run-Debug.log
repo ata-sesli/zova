@@ -1,0 +1,44 @@
+BIN Debug 2324d27215208a6a 2026-11-27T17:24:47+0300
+Debug ckptrace#01 rc=0 RESULT PASS 28s
+    ckpt_races 63 ckpt_fallbacks 62 ckpt_violations 0
+Debug ckptrace#02 rc=0 RESULT PASS 29s
+    ckpt_races 73 ckpt_fallbacks 73 ckpt_violations 0
+Debug ckptrace#03 rc=0 RESULT PASS 27s
+    ckpt_races 60 ckpt_fallbacks 60 ckpt_violations 0
+Debug ckptrace#04 rc=0 RESULT PASS 27s
+    ckpt_races 57 ckpt_fallbacks 57 ckpt_violations 0
+Debug ckptrace#05 rc=0 RESULT PASS 27s
+    ckpt_races 74 ckpt_fallbacks 74 ckpt_violations 0
+Debug ckptrace#06 rc=0 RESULT PASS 27s
+    ckpt_races 57 ckpt_fallbacks 57 ckpt_violations 0
+Debug ckptrace#07 rc=0 RESULT PASS 27s
+    ckpt_races 68 ckpt_fallbacks 67 ckpt_violations 0
+Debug ckptrace#08 rc=0 RESULT PASS 28s
+    ckpt_races 67 ckpt_fallbacks 67 ckpt_violations 0
+Debug ckptrace#09 rc=0 RESULT PASS 28s
+    ckpt_races 54 ckpt_fallbacks 54 ckpt_violations 0
+Debug ckptrace#10 rc=0 RESULT PASS 28s
+    ckpt_races 68 ckpt_fallbacks 68 ckpt_violations 0
+Debug ckptrace#11 rc=0 RESULT PASS 27s
+    ckpt_races 53 ckpt_fallbacks 52 ckpt_violations 0
+Debug ckptrace#12 rc=0 RESULT PASS 29s
+    ckpt_races 57 ckpt_fallbacks 56 ckpt_violations 0
+Debug ckptrace#13 rc=0 RESULT PASS 28s
+    ckpt_races 63 ckpt_fallbacks 63 ckpt_violations 0
+Debug ckptrace#14 rc=0 RESULT PASS 28s
+    ckpt_races 55 ckpt_fallbacks 55 ckpt_violations 0
+Debug ckptrace#15 rc=0 RESULT PASS 28s
+    ckpt_races 56 ckpt_fallbacks 56 ckpt_violations 0
+Debug ckptrace#16 rc=0 RESULT PASS 29s
+    ckpt_races 63 ckpt_fallbacks 63 ckpt_violations 0
+Debug ckptrace#17 rc=0 RESULT PASS 28s
+    ckpt_races 51 ckpt_fallbacks 51 ckpt_violations 0
+Debug ckptrace#18 rc=0 RESULT PASS 28s
+    ckpt_races 54 ckpt_fallbacks 54 ckpt_violations 0
+Debug ckptrace#19 rc=0 RESULT PASS 29s
+    ckpt_races 54 ckpt_fallbacks 53 ckpt_violations 0
+Debug ckptrace#20 rc=0 RESULT PASS 28s
+    ckpt_races 58 ckpt_fallbacks 58 ckpt_violations 0
+Debug ckptrace-mutated rc=1 RESULT FAIL 29s
+    ckpt_races 50 ckpt_fallbacks 50 ckpt_violations 50
+Debug DONE
