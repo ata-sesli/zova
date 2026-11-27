@@ -1,0 +1,12 @@
+BIN 2324d27215208a6a 2026-11-27T15:27:13+0300
+ownership rc=0 RESULT PASS 4s
+delaypoints rc=0 RESULT PASS 4s
+readers rc=0 RESULT PASS 23s
+ckptrace rc=0 RESULT PASS 27s
+ckptreset rc=0 RESULT PASS 8s
+closeckpt rc=0 RESULT PASS 33s
+nreaders rc=0 RESULT PASS 23s
+crash rc=0 RESULT PASS 27s
+powerloss rc=0 RESULT PASS 66s
+crash+recovery rc=0 RESULT PASS 99s
+SECTIONS-DONE

@@ -1,0 +1,5 @@
+== N files: live writer + 2 reader processes x 2 threads
+2 files cwal ckpt=all: {'reads': 3674, 'mixed': 0, 'broken': 0, 'snapshot_reads': 1011, 'seq_retries': 548, 'snapshot_waits': 25, 'ckpt_violations': 0} check=ok
+2 files cwal ckpt=passive: {'reads': 2086, 'mixed': 0, 'broken': 0, 'snapshot_reads': 1914, 'seq_retries': 1054, 'snapshot_waits': 9, 'ckpt_violations': 0} check=ok
+3 files plain ckpt=all: {'reads': 4950, 'mixed': 83, 'broken': 0, 'snapshot_reads': 0, 'seq_retries': 0, 'snapshot_waits': 0, 'ckpt_violations': 0} check=ok
+3 files plain ckpt=passive: {'reads': 1136, 'mixed': 645, 'broken': 0, 'snapshot_reads': 0, 'seq_retries': 0, 'snapshot_waits': 0, 'ckpt_violations': 0} check=ok
