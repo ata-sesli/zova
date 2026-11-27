@@ -1,0 +1,7 @@
+kernel: Darwin 24.6.0 xnu-11417.140.69.711.44~1/RELEASE_ARM64_T8103 arm64 (macOS 15.7.8)
+cpu: Apple M1 (8 cores: 4 performance, 4 efficiency)
+memory: 16 GiB
+zig: 0.17.1
+python: Python 3.15.2
+cc: Apple clang version 17.0.0 (clang-1700.0.13.3)
+scratch: /dev/disk5s1 on /Volumes/wipesides (apfs, local, nodev, nosuid, journaled, noowners); external USB solid-state disk

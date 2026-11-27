@@ -1,0 +1,58 @@
+diff --git a/prototypes/cwal/src/cwal.zig b/prototypes/cwal/src/cwal.zig
+index 7d70c1c..1977fee 100644
+--- a/prototypes/cwal/src/cwal.zig
++++ b/prototypes/cwal/src/cwal.zig
+@@ -1534,7 +1534,7 @@ pub const Conn = struct {
+     fn lock(fd: c_int, op: c_int) bool {
+         while (true) {
+             if (c.flock(fd, op) == 0) return true;
+-            if (c.__errno_location().* != c.EINTR) return false;
++            if (std.c._errno().* != c.EINTR) return false;
+         }
+     }
+ 
+@@ -1688,7 +1688,7 @@ pub const Conn = struct {
+             if (!lock(fd, c.LOCK_SH)) return error.Io;
+             return fd;
+         }
+-        if (c.__errno_location().* != c.EWOULDBLOCK) return error.Io;
++        if (std.c._errno().* != c.EWOULDBLOCK) return error.Io;
+         // Owned: only by holders of shared locks, since the exclusive lock is
+         // taken only under the gate.
+         const size = fileSize(fd) orelse return error.Io;
+diff --git a/prototypes/cwal/src/workload.zig b/prototypes/cwal/src/workload.zig
+index 545507b..346dbef 100644
+--- a/prototypes/cwal/src/workload.zig
++++ b/prototypes/cwal/src/workload.zig
+@@ -841,8 +841,20 @@ pub fn seed(dir: []const u8, cfg: SeedConfig) void {
+ 
+ /// Sleep until monotonic time `ns` (absolute).
+ fn sleepUntil(ns: u64) void {
+-    var ts: [2]c_long = .{ @intCast(ns / 1_000_000_000), @intCast(ns % 1_000_000_000) };
+-    while (c.clock_nanosleep(c.CLOCK_MONOTONIC, 1, @ptrCast(&ts), null) != 0) {}
++    if (@hasDecl(c, "clock_nanosleep")) {
++        var ts: [2]c_long = .{ @intCast(ns / 1_000_000_000), @intCast(ns % 1_000_000_000) };
++        while (c.clock_nanosleep(c.CLOCK_MONOTONIC, 1, @ptrCast(&ts), null) != 0) {}
++    } else {
++        // macOS has no clock_nanosleep: sleep for the remaining time.
++        while (true) {
++            var now: c.struct_timespec = undefined;
++            _ = c.clock_gettime(c.CLOCK_MONOTONIC, &now);
++            const cur = @as(u64, @intCast(now.tv_sec)) * 1_000_000_000 + @as(u64, @intCast(now.tv_nsec));
++            if (cur >= ns) return;
++            var ts: c.struct_timespec = .{ .tv_sec = @intCast((ns - cur) / 1_000_000_000), .tv_nsec = @intCast((ns - cur) % 1_000_000_000) };
++            _ = c.nanosleep(&ts, null);
++        }
++    }
+ }
+ 
+ fn threadCpuNs() u64 {
+@@ -1167,7 +1179,7 @@ pub fn run(dir: []const u8, cfg: Config) void {
+     });
+     out("resources mode={s} scenario={s} wall_s={d:.1} cpu_s={d:.2} writer_cpu_s={d:.2} reader_cpu_s={d:.2} ckpt_s={d:.2} final_ckpt_ms={d:.0} max_rss_mb={d:.1} peak_rss_mb={d:.1} payload_mb={d:.2} wchar_mb={d:.1} write_bytes_mb={d:.1} write_amp={d:.2} disk_write_amp={d:.2} fsyncs={d} fsyncs_per_write_op={d:.2} peak_wal_mb={d:.1} db_growth_mb={d:.1}\n", tag ++ .{
+         wall,                                                                                                                   cpu_total,                 @as(f64, @floatFromInt(wjob.cpu_ns)) / 1e9,                                           @as(f64, @floatFromInt(rcpu)) / 1e9,
+-        @as(f64, @floatFromInt(wjob.ckpt_ns)) / 1e9,                                                                            final_ckpt_ms,             @as(f64, @floatFromInt(ru.unnamed_0.ru_maxrss)) / 1024.0,                             mb(peak_rss),
++        @as(f64, @floatFromInt(wjob.ckpt_ns)) / 1e9,                                                                            final_ckpt_ms,             @as(f64, @floatFromInt(if (@hasField(c.struct_rusage, "ru_maxrss")) ru.ru_maxrss else ru.unnamed_0.ru_maxrss)) / 1024.0,                             mb(peak_rss),
+         mb(payload),                                                                                                            mb(io1.wchar - io0.wchar), mb(io1.write_bytes - io0.write_bytes),                                                if (payload != 0) @as(f64, @floatFromInt(io1.wchar - io0.wchar)) / @as(f64, @floatFromInt(payload)) else 0,
+         if (payload != 0) @as(f64, @floatFromInt(io1.write_bytes - io0.write_bytes)) / @as(f64, @floatFromInt(payload)) else 0, syncs,                     if (wops != 0) @as(f64, @floatFromInt(syncs)) / @as(f64, @floatFromInt(wops)) else 0, mb(peak_wal),
+         mb(db1 -| db0),

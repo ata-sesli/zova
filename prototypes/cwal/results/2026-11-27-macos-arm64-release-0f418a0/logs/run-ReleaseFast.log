@@ -1,0 +1,53 @@
+BIN ReleaseFast d226820a3b9936ae 2026-11-27T17:11:25+0300
+ReleaseFast ownership rc=0 RESULT PASS 4s
+ReleaseFast delaypoints rc=0 RESULT PASS 4s
+ReleaseFast readers rc=0 RESULT PASS 20s
+ReleaseFast ckptrace rc=0 RESULT PASS 24s
+ReleaseFast ckptreset rc=0 RESULT PASS 8s
+ReleaseFast closeckpt rc=0 RESULT PASS 33s
+ReleaseFast nreaders rc=0 RESULT PASS 22s
+ReleaseFast powerloss rc=0 RESULT PASS 62s
+ReleaseFast crash+recovery rc=0 RESULT PASS 97s
+ReleaseFast ckptrace#01 rc=0 RESULT PASS 25s
+    ckpt_races 82 ckpt_fallbacks 74 ckpt_violations 0
+ReleaseFast ckptrace#02 rc=0 RESULT PASS 25s
+    ckpt_races 64 ckpt_fallbacks 58 ckpt_violations 0
+ReleaseFast ckptrace#03 rc=0 RESULT PASS 25s
+    ckpt_races 61 ckpt_fallbacks 54 ckpt_violations 0
+ReleaseFast ckptrace#04 rc=0 RESULT PASS 24s
+    ckpt_races 84 ckpt_fallbacks 72 ckpt_violations 0
+ReleaseFast ckptrace#05 rc=0 RESULT PASS 25s
+    ckpt_races 83 ckpt_fallbacks 66 ckpt_violations 0
+ReleaseFast ckptrace#06 rc=0 RESULT PASS 23s
+    ckpt_races 82 ckpt_fallbacks 66 ckpt_violations 0
+ReleaseFast ckptrace#07 rc=0 RESULT PASS 24s
+    ckpt_races 77 ckpt_fallbacks 64 ckpt_violations 0
+ReleaseFast ckptrace#08 rc=0 RESULT PASS 25s
+    ckpt_races 71 ckpt_fallbacks 56 ckpt_violations 0
+ReleaseFast ckptrace#09 rc=0 RESULT PASS 25s
+    ckpt_races 84 ckpt_fallbacks 69 ckpt_violations 0
+ReleaseFast ckptrace#10 rc=0 RESULT PASS 25s
+    ckpt_races 86 ckpt_fallbacks 73 ckpt_violations 0
+ReleaseFast ckptrace#11 rc=0 RESULT PASS 26s
+    ckpt_races 82 ckpt_fallbacks 74 ckpt_violations 0
+ReleaseFast ckptrace#12 rc=0 RESULT PASS 24s
+    ckpt_races 84 ckpt_fallbacks 71 ckpt_violations 0
+ReleaseFast ckptrace#13 rc=0 RESULT PASS 24s
+    ckpt_races 97 ckpt_fallbacks 78 ckpt_violations 0
+ReleaseFast ckptrace#14 rc=0 RESULT PASS 25s
+    ckpt_races 76 ckpt_fallbacks 58 ckpt_violations 0
+ReleaseFast ckptrace#15 rc=0 RESULT PASS 25s
+    ckpt_races 72 ckpt_fallbacks 65 ckpt_violations 0
+ReleaseFast ckptrace#16 rc=0 RESULT PASS 26s
+    ckpt_races 76 ckpt_fallbacks 65 ckpt_violations 0
+ReleaseFast ckptrace#17 rc=0 RESULT PASS 25s
+    ckpt_races 75 ckpt_fallbacks 63 ckpt_violations 0
+ReleaseFast ckptrace#18 rc=0 RESULT PASS 25s
+    ckpt_races 93 ckpt_fallbacks 87 ckpt_violations 0
+ReleaseFast ckptrace#19 rc=0 RESULT PASS 24s
+    ckpt_races 70 ckpt_fallbacks 62 ckpt_violations 0
+ReleaseFast ckptrace#20 rc=0 RESULT PASS 25s
+    ckpt_races 88 ckpt_fallbacks 72 ckpt_violations 0
+ReleaseFast ckptrace-mutated rc=1 RESULT FAIL 25s
+    ckpt_races 76 ckpt_fallbacks 66 ckpt_violations 66
+ReleaseFast DONE

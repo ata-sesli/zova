@@ -1,0 +1,12 @@
+== N files: live writer + 2 reader processes x 2 threads
+2 files cwal ckpt=all: {'reads': 7097, 'mixed': 0, 'broken': 0, 'snapshot_reads': 1406, 'seq_retries': 701, 'snapshot_waits': 44, 'ckpt_violations': 0} check=ok
+2 files cwal ckpt=passive: {'reads': 3810, 'mixed': 0, 'broken': 0, 'snapshot_reads': 3184, 'seq_retries': 1509, 'snapshot_waits': 45, 'ckpt_violations': 0} check=ok
+3 files plain ckpt=all: {'reads': 4792, 'mixed': 266, 'broken': 0, 'snapshot_reads': 0, 'seq_retries': 0, 'snapshot_waits': 0, 'ckpt_violations': 0} check=ok
+3 files plain ckpt=passive: {'reads': 2445, 'mixed': 803, 'broken': 0, 'snapshot_reads': 0, 'seq_retries': 0, 'snapshot_waits': 0, 'ckpt_violations': 0} check=ok
+3 files cwal ckpt=all: {'reads': 4568, 'mixed': 0, 'broken': 0, 'snapshot_reads': 954, 'seq_retries': 903, 'snapshot_waits': 81, 'ckpt_violations': 0} check=ok
+3 files cwal ckpt=passive: {'reads': 2472, 'mixed': 0, 'broken': 0, 'snapshot_reads': 2360, 'seq_retries': 2175, 'snapshot_waits': 145, 'ckpt_violations': 0} check=ok
+8 files plain ckpt=all: {'reads': 2076, 'mixed': 219, 'broken': 0, 'snapshot_reads': 0, 'seq_retries': 0, 'snapshot_waits': 0, 'ckpt_violations': 0} check=FAIL torn transactions=1
+8 files plain ckpt=passive: {'reads': 1429, 'mixed': 963, 'broken': 0, 'snapshot_reads': 0, 'seq_retries': 0, 'snapshot_waits': 0, 'ckpt_violations': 0} check=ok
+8 files cwal ckpt=all: {'reads': 2226, 'mixed': 0, 'broken': 0, 'snapshot_reads': 152, 'seq_retries': 209, 'snapshot_waits': 76, 'ckpt_violations': 0} check=ok
+8 files cwal ckpt=passive: {'reads': 862, 'mixed': 0, 'broken': 0, 'snapshot_reads': 861, 'seq_retries': 971, 'snapshot_waits': 270, 'ckpt_violations': 0} check=ok
+RESULT PASS

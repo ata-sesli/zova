@@ -1,0 +1,24 @@
+== power loss at every writer event, 1 seeds (unsynced writes dropped or torn)
+  [plain crash powerloss] 1/1340 (0s)
+  [plain crash powerloss] 790/1340 (5s)
+  [plain crash powerloss] 1294/1340 (10s)
+  [plain crash powerloss] 1340/1340 (11s)
+plain: events=1340 runs=1340 failures=135 recoveries={'none': 1205, '-': 135}
+      135  FAIL torn pairs main=# store=#
+  [cwal crash powerloss] 1/1678 (0s)
+  [cwal crash powerloss] 466/1678 (5s)
+  [cwal crash powerloss] 953/1678 (10s)
+  [cwal crash powerloss] 1373/1678 (15s)
+  [cwal crash powerloss] 1678/1678 (19s)
+cwal: events=1678 runs=1678 failures=0 recoveries={'none': 1527, 'rollback': 151}
+== power loss during recovery
+  [recovery crash] 1/4320 (0s)
+  [recovery crash] 678/4320 (5s)
+  [recovery crash] 1417/4320 (10s)
+  [recovery crash] 2058/4320 (15s)
+  [recovery crash] 2782/4320 (20s)
+  [recovery crash] 3434/4320 (25s)
+  [recovery crash] 4088/4320 (30s)
+  [recovery crash] 4320/4320 (32s)
+cwal: torn states=20 runs=4320 failures=0
+RESULT PASS
