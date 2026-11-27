@@ -46,6 +46,9 @@ pub const Error = error{
     Interrupt,
     ReadOnly,
     Corrupt,
+    /// A connection's commit protocol (`Coordinator`) found its set broken
+    /// (zova_error.zig).
+    CommitSetBroken,
 };
 
 fn sqlAfterTrivia(sql: []const u8) []const u8 {
@@ -137,6 +140,70 @@ pub const StepHook = struct {
 
 pub var before_step_hook: if (@import("builtin").is_test) ?StepHook else void = if (@import("builtin").is_test) null else {};
 
+pub const Authorizer = *const fn (?*anyopaque, c_int, [*c]const u8, [*c]const u8, [*c]const u8, [*c]const u8) callconv(.c) c_int;
+
+/// A cross-file commit protocol that owns a connection (the experimental
+/// CWAL, database/cwal_set.zig). Installed on the connection itself, so every
+/// `Database` wrapper over it routes transaction starts, commits and
+/// authorizer changes through it.
+pub const Coordinator = struct {
+    context: *anyopaque,
+    /// Start a transaction; `immediate` asks for the write lock up front.
+    begin: *const fn (context: *anyopaque, immediate: bool) Error!void,
+    /// Before a statement that may commit.
+    prepare_commit: *const fn (context: *anyopaque) Error!void,
+    /// After that statement, whether or not it committed.
+    end_commit: *const fn (context: *anyopaque) void,
+    /// The error for a commit the protocol's commit hook refused.
+    commit_refused: *const fn (context: *anyopaque) Error,
+    /// Set the authorizer the protocol consults after its own checks.
+    set_authorizer: *const fn (context: *anyopaque, callback: ?Authorizer, user: ?*anyopaque) void,
+    /// Run a `savepoint` statement, `sql`, which starts a transaction when
+    /// the connection is in autocommit mode.
+    savepoint: *const fn (context: *anyopaque, sql: [:0]const u8) Error!void,
+    /// Before the first step of a query (`isQuery`) in autocommit mode: the
+    /// protocol may open a read transaction that `statement` owns.
+    begin_statement_read: *const fn (context: *anyopaque, statement: *c.sqlite3_stmt) Error!void,
+    /// `statement` finished, was reset or was finalized: end the read
+    /// transaction it owns, if any.
+    end_statement_read: *const fn (context: *anyopaque, statement: *c.sqlite3_stmt) void,
+};
+
+const coordinator_key = "zova_commit_coordinator";
+
+fn coordinatorOf(handle: *c.sqlite3) ?*const Coordinator {
+    const value = c.sqlite3_get_clientdata(handle, coordinator_key) orelse return null;
+    return @ptrCast(@alignCast(value));
+}
+
+/// A read-only statement that reads rows: SELECT, WITH or VALUES. Not a
+/// transaction statement or a PRAGMA.
+fn isQuery(statement: *c.sqlite3_stmt) bool {
+    if (c.sqlite3_stmt_readonly(statement) == 0) return false;
+    const sql = sqlAfterTrivia(std.mem.span(c.sqlite3_sql(statement) orelse return false));
+    const word_end = for (sql, 0..) |byte, i| {
+        if (!std.ascii.isAlphabetic(byte)) break i;
+    } else sql.len;
+    const word = sql[0..word_end];
+    return std.ascii.eqlIgnoreCase(word, "select") or std.ascii.eqlIgnoreCase(word, "with") or std.ascii.eqlIgnoreCase(word, "values");
+}
+
+/// End the read transaction `statement` owns, if its connection's commit
+/// protocol opened one for it.
+fn endStatementRead(handle: *c.sqlite3, statement: *c.sqlite3_stmt) void {
+    if (coordinatorOf(handle)) |co| co.end_statement_read(co.context, statement);
+}
+
+/// Map a failed exec or step on `handle`. A commit the connection's commit
+/// protocol refused in its commit hook gets the protocol's error, so exec and
+/// a prepared statement report the same refusal the same way.
+fn connectionError(handle: *c.sqlite3, rc: c_int) Error {
+    if (c.sqlite3_extended_errcode(handle) == c.SQLITE_CONSTRAINT_COMMITHOOK) {
+        if (coordinatorOf(handle)) |co| return co.commit_refused(co.context);
+    }
+    return mapResultCode(rc);
+}
+
 pub const Database = struct {
     handle: *c.sqlite3,
     // Engine-owned connection-local SQL facilities. Not a SQLite handle or
@@ -200,8 +267,48 @@ pub const Database = struct {
 
     /// Execute SQL that does not need bound parameters or returned rows.
     pub fn exec(self: *Database, sql: [:0]const u8) Error!void {
+        if (self.coordinator() != null) return self.execStatements(sql);
         const rc = c.sqlite3_exec(self.handle, sql.ptr, null, null, null);
+        if (rc == c.SQLITE_OK) return;
+        return connectionError(self.handle, rc);
+    }
+
+    /// `sqlite3_exec` without a callback, one `Statement` at a time, so a
+    /// commit protocol sees every statement start and finish.
+    fn execStatements(self: *Database, sql: [:0]const u8) Error!void {
+        var rest: [*c]const u8 = sql.ptr;
+        while (rest != null and rest[0] != 0) {
+            var raw_stmt: ?*c.sqlite3_stmt = null;
+            var tail: [*c]const u8 = null;
+            const rc = c.sqlite3_prepare_v2(self.handle, rest, -1, &raw_stmt, &tail);
+            if (rc != c.SQLITE_OK) return mapResultCode(rc);
+            rest = tail;
+            var stmt: Statement = .{ .db = self, .handle = raw_stmt orelse continue };
+            defer stmt.deinit();
+            while (try stmt.step() == .row) {}
+        }
+    }
+
+    /// Install `coordinator` on this connection, or remove it with null. It
+    /// must outlive the connection or its removal; `destroy`, when given,
+    /// runs once SQLite drops it (at close, or when it is replaced).
+    pub fn setCoordinator(self: *Database, coordinator_value: ?*Coordinator, destroy: ?*const fn (?*anyopaque) callconv(.c) void) Error!void {
+        const rc = c.sqlite3_set_clientdata(self.handle, coordinator_key, coordinator_value, destroy);
         if (rc != c.SQLITE_OK) return mapResultCode(rc);
+    }
+
+    /// The commit protocol that owns this connection, if any.
+    pub fn coordinator(self: *const Database) ?*const Coordinator {
+        return coordinatorOf(self.handle);
+    }
+
+    /// Run `sql`, which may commit, through the connection's commit
+    /// protocol.
+    fn execCommitting(self: *Database, sql: [:0]const u8) Error!void {
+        const co = self.coordinator() orelse return self.exec(sql);
+        try co.prepare_commit(co.context);
+        defer co.end_commit(co.context);
+        try self.exec(sql);
     }
 
     /// Attach another SQLite database under a compile-time schema name.
@@ -248,6 +355,7 @@ pub const Database = struct {
     /// This is a thin wrapper over `begin`; nested transaction behavior,
     /// locking, and failure modes are SQLite's normal semantics.
     pub fn begin(self: *Database) Error!void {
+        if (self.coordinator()) |co| return co.begin(co.context, false);
         try self.exec("begin");
     }
 
@@ -257,12 +365,13 @@ pub const Database = struct {
     /// default for storage code that knows it is about to write. Locking and
     /// busy behavior follow SQLite's normal `begin immediate` semantics.
     pub fn beginImmediate(self: *Database) Error!void {
+        if (self.coordinator()) |co| return co.begin(co.context, true);
         try self.exec("begin immediate");
     }
 
     /// Commit the active transaction using SQLite's normal `commit` semantics.
     pub fn commit(self: *Database) Error!void {
-        try self.exec("commit");
+        try self.execCommitting("commit");
     }
 
     /// Roll back the active transaction using SQLite's normal `rollback` semantics.
@@ -287,7 +396,8 @@ pub const Database = struct {
         try self.execSavepoint("rollback to", name);
     }
 
-    /// Release a named SQLite savepoint.
+    /// Release a named SQLite savepoint. Releasing the outermost savepoint
+    /// of a transaction that a savepoint started commits it.
     pub fn releaseSavepoint(self: *Database, name: []const u8) Error!void {
         try self.execSavepoint("release", name);
     }
@@ -296,6 +406,8 @@ pub const Database = struct {
         try validateSavepointName(name);
         var sql_buffer: [96]u8 = undefined;
         const sql = std.fmt.bufPrintSentinel(&sql_buffer, prefix ++ " {s}", .{name}, 0) catch unreachable;
+        if (comptime std.mem.eql(u8, prefix, "release")) return self.execCommitting(sql);
+        if (comptime std.mem.eql(u8, prefix, "savepoint")) if (self.coordinator()) |co| return co.savepoint(co.context, sql);
         try self.exec(sql);
     }
 
@@ -394,7 +506,10 @@ pub const Database = struct {
 
     /// Connection-scoped authorization. The caller exclusively owns this
     /// connection and must clear the callback after all statements finalize.
-    pub fn setAuthorizer(self: *Database, callback: ?*const fn (?*anyopaque, c_int, [*c]const u8, [*c]const u8, [*c]const u8, [*c]const u8) callconv(.c) c_int, context: ?*anyopaque) Error!void {
+    /// On a connection with a commit protocol, the callback runs after the
+    /// protocol's own checks, and clearing it leaves those in place.
+    pub fn setAuthorizer(self: *Database, callback: ?Authorizer, context: ?*anyopaque) Error!void {
+        if (self.coordinator()) |co| return co.set_authorizer(co.context, callback, context);
         const rc = c.sqlite3_set_authorizer(self.handle, callback, context);
         if (rc != c.SQLITE_OK) return mapResultCode(rc);
     }
@@ -591,7 +706,9 @@ pub const Statement = struct {
     /// cleanup intentionally ignores the result. Callers should observe
     /// execution errors from `step`, not from deferred cleanup.
     pub fn deinit(self: *Statement) void {
+        const connection_handle = c.sqlite3_db_handle(self.handle).?;
         _ = c.sqlite3_finalize(self.handle);
+        endStatementRead(connection_handle, self.handle);
     }
 
     /// SQLite's statement classification, not a sandbox against side-effecting
@@ -711,12 +828,18 @@ pub const Statement = struct {
         if (@import("builtin").is_test) if (before_step_hook) |hook| {
             if (c.sqlite3_db_handle(self.handle) == hook.connection) hook.run(hook.context);
         };
+        const connection_handle = c.sqlite3_db_handle(self.handle).?;
+        // A commit protocol may give a query that would read in autocommit
+        // mode a read transaction of its own (a CWAL reader: one view of
+        // every member, which SQLite's per-file lazy reads cannot promise).
+        if (c.sqlite3_stmt_busy(self.handle) == 0 and c.sqlite3_get_autocommit(connection_handle) != 0) {
+            if (coordinatorOf(connection_handle)) |co| if (isQuery(self.handle)) try co.begin_statement_read(co.context, self.handle);
+        }
         const rc = c.sqlite3_step(self.handle);
-        return switch (rc) {
-            c.SQLITE_ROW => .row,
-            c.SQLITE_DONE => .done,
-            else => mapResultCode(rc),
-        };
+        if (rc == c.SQLITE_ROW) return .row;
+        const result: Error!Step = if (rc == c.SQLITE_DONE) .done else connectionError(connection_handle, rc);
+        endStatementRead(connection_handle, self.handle);
+        return result;
     }
 
     /// Step a statement that must not produce a row.
@@ -735,6 +858,7 @@ pub const Statement = struct {
     /// `clearBindings` when the next execution should start unbound.
     pub fn reset(self: *Statement) Error!void {
         const rc = c.sqlite3_reset(self.handle);
+        endStatementRead(c.sqlite3_db_handle(self.handle).?, self.handle);
         if (rc != c.SQLITE_OK) return mapResultCode(rc);
     }
 

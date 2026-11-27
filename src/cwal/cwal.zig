@@ -1351,10 +1351,18 @@ pub const Conn = struct {
     marker_pending: bool = false,
     /// The commit in progress has written a commit frame to some member.
     any_commit_frame: bool = false,
+    /// The commit hook refused a cross-file commit that carried no markers.
     violation: bool = false,
     /// A statement of this handle's own is running: the authorizer lets it
     /// write the marker tables.
     internal: bool = false,
+    /// The application's authorizer, consulted after CWAL's own checks
+    /// (`setInnerAuthorizer`).
+    inner_authorizer: ?Authorizer = null,
+    inner_context: ?*anyopaque = null,
+    /// Reader: the statement whose autocommit read transaction this handle
+    /// started (database/cwal_set.zig), ended when that statement finishes.
+    statement_read: ?*anyopaque = null,
     /// Snapshot reads: the window (odd sequence) whose snapshots are being
     /// opened, 0 otherwise.
     opening_seq: u64 = 0,
@@ -1468,25 +1476,42 @@ pub const Conn = struct {
         return conn;
     }
 
+    pub const Authorizer = *const fn (?*anyopaque, c_int, [*c]const u8, [*c]const u8, [*c]const u8, [*c]const u8) callconv(.c) c_int;
+
     /// Statements the application may not run on a CWAL handle: writes to
     /// the marker tables, dropping or altering them or putting triggers on
     /// them, pragmas that would take a member out of the protocol (journal
     /// mode, locking mode, sync level, writable schema), and ATTACH or
-    /// DETACH, which would change the set this handle commits.
+    /// DETACH, which would change the set this handle commits. What these
+    /// checks allow, the inner authorizer then decides.
     fn authorize(arg: ?*anyopaque, action: c_int, a1: [*c]const u8, a2: [*c]const u8, db_name: [*c]const u8, trigger: [*c]const u8) callconv(.c) c_int {
-        _ = db_name;
-        _ = trigger;
         const conn: *Conn = @ptrCast(@alignCast(arg.?));
-        if (conn.internal or fault.mutated("no-authorizer")) return c.SQLITE_OK;
-        const deny = switch (action) {
+        if (conn.internal) return c.SQLITE_OK;
+        const deny = !fault.mutated("no-authorizer") and switch (action) {
             c.SQLITE_INSERT, c.SQLITE_UPDATE, c.SQLITE_DELETE, c.SQLITE_DROP_TABLE, c.SQLITE_DROP_TEMP_TABLE => isMarker(a1),
             c.SQLITE_ALTER_TABLE, c.SQLITE_CREATE_TRIGGER, c.SQLITE_CREATE_TEMP_TRIGGER => isMarker(a2),
             c.SQLITE_PRAGMA => a2 != null and (isName(a1, "journal_mode") or isName(a1, "locking_mode") or isName(a1, "synchronous") or isName(a1, "writable_schema")),
+            // Also refuses VACUUM and VACUUM INTO, which attach their
+            // output as `vacuum_db` (sqlite3RunVacuum) through this check.
             c.SQLITE_ATTACH, c.SQLITE_DETACH => true,
             else => false,
         };
-        if (deny) conn.log("authorizer denied action {d} {s}", .{ action, if (a1 != null) std.mem.span(a1) else "" });
-        return if (deny) c.SQLITE_DENY else c.SQLITE_OK;
+        if (deny) {
+            conn.log("authorizer denied action {d} {s}", .{ action, if (a1 != null) std.mem.span(a1) else "" });
+            return c.SQLITE_DENY;
+        }
+        const inner = conn.inner_authorizer orelse return c.SQLITE_OK;
+        return inner(conn.inner_context, action, a1, a2, db_name, trigger);
+    }
+
+    /// Set (or, with null, clear) the authorizer consulted after CWAL's own
+    /// checks, in place of `sqlite3_set_authorizer`, which would replace
+    /// them. Like that call, it expires the handle's prepared statements, so
+    /// each is authorized again under the new authorizer.
+    pub fn setInnerAuthorizer(conn: *Conn, callback: ?Authorizer, context: ?*anyopaque) void {
+        conn.inner_authorizer = callback;
+        conn.inner_context = context;
+        if (conn.mode == .cwal) _ = c.sqlite3_set_authorizer(conn.db, &authorize, conn);
     }
 
     fn isName(name: [*c]const u8, want: []const u8) bool {
@@ -1515,7 +1540,7 @@ pub const Conn = struct {
         const main_uri = bufPrintZ(&uri_buf, "file:{s}?cwal={d}&cwm=0", .{ conn.paths[0], id }) catch return error.Io;
         var db: ?*c.sqlite3 = null;
         if (c.sqlite3_open_v2(main_uri.ptr, &db, c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_URI, "cwal") != c.SQLITE_OK) {
-            std.debug.print("sqlite: open {s}: {s}\n", .{ conn.paths[0], c.sqlite3_errmsg(db) });
+            if (hooks) std.debug.print("sqlite: open {s}: {s}\n", .{ conn.paths[0], c.sqlite3_errmsg(db) });
             if (db) |d| _ = c.sqlite3_close(d);
             return error.Sqlite;
         }
@@ -1651,7 +1676,7 @@ pub const Conn = struct {
         var stmt: ?*c.sqlite3_stmt = null;
         defer _ = c.sqlite3_finalize(stmt);
         if (c.sqlite3_prepare_v2(conn.db, sql.ptr, -1, &stmt, null) != c.SQLITE_OK or c.sqlite3_step(stmt) != c.SQLITE_ROW) {
-            std.debug.print("sqlite: {s}: {s}\n", .{ sql, c.sqlite3_errmsg(conn.db) });
+            if (hooks) std.debug.print("sqlite: {s}: {s}\n", .{ sql, c.sqlite3_errmsg(conn.db) });
             return error.Sqlite;
         }
         const text = c.sqlite3_column_text(stmt, 0) orelse return false;
@@ -1662,7 +1687,7 @@ pub const Conn = struct {
         var stmt: ?*c.sqlite3_stmt = null;
         defer _ = c.sqlite3_finalize(stmt);
         if (c.sqlite3_prepare_v2(conn.db, sql.ptr, -1, &stmt, null) != c.SQLITE_OK or c.sqlite3_step(stmt) != c.SQLITE_ROW) {
-            std.debug.print("sqlite: {s}: {s}\n", .{ sql, c.sqlite3_errmsg(conn.db) });
+            if (hooks) std.debug.print("sqlite: {s}: {s}\n", .{ sql, c.sqlite3_errmsg(conn.db) });
             return error.Sqlite;
         }
         return @intCast(c.sqlite3_column_int64(stmt, 0));
@@ -1672,7 +1697,7 @@ pub const Conn = struct {
         var message: [*c]u8 = null;
         if (c.sqlite3_exec(conn.db, sql.ptr, null, null, &message) != c.SQLITE_OK) {
             if (message != null) {
-                std.debug.print("sqlite: {s}: {s}\n", .{ sql, message });
+                if (hooks) std.debug.print("sqlite: {s}: {s}\n", .{ sql, message });
                 c.sqlite3_free(message);
             }
             return error.Sqlite;
@@ -2204,29 +2229,49 @@ pub const Conn = struct {
     /// more members first records its number and member set (its commit
     /// marker) in each of them.
     pub fn commit(conn: *Conn) Error!void {
-        if (conn.mode == .cwal and !fault.mutated("no-markers")) {
-            var mask: u32 = 0;
+        try conn.writeMarkers();
+        defer conn.endCommit();
+        try conn.exec("commit");
+    }
+
+    /// The first half of `commit`, for a caller that commits with its own
+    /// statement (`COMMIT`, or the `RELEASE` of an outermost savepoint):
+    /// when the open transaction has write-locked two or more members, write
+    /// its markers in each of them and let the commit hook accept the next
+    /// commit. Call `endCommit` once that statement has run.
+    pub fn writeMarkers(conn: *Conn) Error!void {
+        if (conn.mode != .cwal or fault.mutated("no-markers")) return;
+        var mask: u32 = 0;
+        for (0..conn.nmembers) |m| {
+            if (conn.write_locked[m]) mask |= @as(u32, 1) << @intCast(m);
+        }
+        if (@popCount(mask) < 2) return;
+        const t = conn.txn + 1;
+        {
+            conn.internal = true;
+            defer conn.internal = false;
             for (0..conn.nmembers) |m| {
-                if (conn.write_locked[m]) mask |= @as(u32, 1) << @intCast(m);
-            }
-            if (@popCount(mask) >= 2) {
-                const t = conn.txn + 1;
-                conn.internal = true;
-                defer conn.internal = false;
-                for (0..conn.nmembers) |m| {
-                    if (mask & (@as(u32, 1) << @intCast(m)) == 0) continue;
-                    var buf: [128]u8 = undefined;
-                    try conn.exec(bufPrintZ(&buf, "update {s}." ++ marker_table ++ " set txn = {d}, mask = {d} where k = 0", .{ conn.schemas[m], t, mask }) catch return error.Io);
-                }
-                conn.marker_pending = true;
-                defer conn.marker_pending = false;
-                // Used even if the commit fails: never reuse a number.
-                conn.txn = t;
-                try conn.exec("commit");
-                return;
+                if (mask & (@as(u32, 1) << @intCast(m)) == 0) continue;
+                var buf: [128]u8 = undefined;
+                try conn.exec(bufPrintZ(&buf, "update {s}." ++ marker_table ++ " set txn = {d}, mask = {d} where k = 0", .{ conn.schemas[m], t, mask }) catch return error.Io);
             }
         }
-        try conn.exec("commit");
+        conn.marker_pending = true;
+        // Used even if the commit fails: never reuse a number.
+        conn.txn = t;
+    }
+
+    /// The second half of `commit`: a later commit needs markers of its own,
+    /// also when the statement after `writeMarkers` did not commit.
+    pub fn endCommit(conn: *Conn) void {
+        conn.marker_pending = false;
+    }
+
+    /// A handle crashed inside a cross-file commit while this one had the
+    /// set open: every handle must close before the set opens again.
+    pub fn isBroken(conn: *const Conn) bool {
+        const page = conn.snap orelse return false;
+        return @atomicLoad(u32, &page.broken, .seq_cst) != 0;
     }
 
     /// Run one statement as its own transaction. A statement that writes
@@ -2255,8 +2300,14 @@ pub const Conn = struct {
     /// commits. `gap_us` waits between pinning members, to widen the window a
     /// mixed view needs.
     pub fn beginRead(conn: *Conn, gap_us: u32) Error!void {
-        if (conn.mode == .cwal) return conn.beginSnapshotRead(gap_us);
-        try conn.exec("begin");
+        return conn.beginReadAs(gap_us, "begin");
+    }
+
+    /// `beginRead`, with `start` as the statement that opens the transaction
+    /// (`begin`, or a `savepoint` in autocommit mode).
+    pub fn beginReadAs(conn: *Conn, gap_us: u32, start: [:0]const u8) Error!void {
+        if (conn.mode == .cwal) return conn.beginSnapshotRead(gap_us, start);
+        try conn.exec(start);
         try conn.pinMembers(gap_us);
     }
 
@@ -2332,7 +2383,7 @@ pub const Conn = struct {
     /// Seqlock read. Outside a publication window, pin the members normally
     /// and retry if a window started meanwhile. Inside one, open each member
     /// at the header the writer saved before any member published.
-    fn beginSnapshotRead(conn: *Conn, gap_us: u32) Error!void {
+    fn beginSnapshotRead(conn: *Conn, gap_us: u32, start_sql: [:0]const u8) Error!void {
         const page = conn.snap.?;
         conn.snapshot_open = false;
         while (true) {
@@ -2341,7 +2392,7 @@ pub const Conn = struct {
             // after publishing marks the set broken before the window ends.
             if (!conn.markersReadable(s1)) return error.Broken;
             if (s1 & 1 == 0) {
-                try conn.exec("begin");
+                try conn.exec(start_sql);
                 try conn.pinMembers(gap_us);
                 if (fault.mutated("no-seq-check") or @atomicLoad(u64, &page.seq, .seq_cst) == s1) return;
                 conn.exec("rollback") catch {};
@@ -2356,7 +2407,7 @@ pub const Conn = struct {
                 conn.stats.seq_retries += 1;
                 continue;
             }
-            try conn.exec("begin");
+            try conn.exec(start_sql);
             if (fault.mutated("no-snapshot-open")) {
                 try conn.pinMembers(gap_us);
                 return;

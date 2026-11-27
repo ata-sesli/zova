@@ -475,7 +475,9 @@ pub fn backupMainDatabaseReporting(
 ) Error!void {
     const hold_snapshot = sqlite.c.sqlite3_get_autocommit(source.handle) != 0;
     if (hold_snapshot) {
-        try source.exec("begin");
+        // Through the connection's commit protocol, if it has one: a CWAL
+        // reader's transaction reads every member at one commit.
+        try source.begin();
         errdefer source.rollback() catch {};
         // Start the read transaction now; a deferred `begin` alone takes no lock.
         try source.exec("pragma main.schema_version");

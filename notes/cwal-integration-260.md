@@ -176,11 +176,11 @@ more members are write-locked:
   bound graph mutations (`zova.zig:2674-2679`), `split`, `reclaimSpace`
   steps and fresh-build sessions (`src/c_api/fresh_build.zig`);
 - `RELEASE` of an outermost savepoint that was opened in autocommit mode,
-  which commits. Zova's own savepoint scopes (`zova_batch_mutation`,
-  `zova_object_mutation`, `fresh_build_session`) are used only inside a
-  caller's transaction, so they never commit. CWAL's commit hook still
-  refuses a cross-file commit without markers, which catches any path
-  missed here.
+  which commits. Some of Zova's internal savepoints (extension lifecycle,
+  plugin calls, vector history reads, KV and object mutations) can be
+  outermost, so every `releaseSavepoint` goes through the commit path
+  (phase 4). CWAL's commit hook still refuses a cross-file commit without
+  markers, which catches any path missed here.
 
 Object mutations call `sqlite.Database.commit` directly, not through the
 `Database` facade. So the change sits one layer down, in `sqlite.Database`:
@@ -196,7 +196,17 @@ pin, or snapshot open):
   a CWAL read;
 - `Database.begin` (deferred) on a CWAL handle also becomes `beginRead`, so
   a caller's read transaction sees all members at one commit;
-- `beginImmediate` is a write transaction and needs no snapshot.
+- `beginImmediate` is a write transaction and needs no snapshot. On the
+  writer it starts deferred, like `begin` (phase 4): `BEGIN IMMEDIATE`
+  write-locks every attached member, which would make every commit
+  cross-file.
+- Zova's `savepoint` in autocommit mode on a reader starts the same read,
+  with the `SAVEPOINT` statement as the transaction's first statement.
+- A query (`SELECT`, `WITH`, `VALUES`) stepped in autocommit mode on a
+  reader, through `sqlite.Statement` or `exec`, runs in a read of its own:
+  SQLite starts each member's read only when the statement first touches
+  that member, and a nested statement (an SQL function, a virtual table)
+  can touch a member mid-statement, so a commit could land in between.
 
 **Raw SQL.** Callers can run SQL through `exec` and `prepare` in every
 binding.
@@ -206,11 +216,10 @@ binding.
   by the commit hook. The error tells the caller to use Zova's
   transaction API.
 - Single-file autocommit writes work unchanged (no markers needed).
-- A single autocommit `SELECT` that reads several schemas gets no
-  cross-file snapshot unless it runs inside a Zova read call or a
-  `begin`/`commit` pair. This is a documented limit. Wrapping every raw
-  statement step would mean intercepting `sqlite3_step`, which is out of
-  scope.
+- A single autocommit `SELECT` that reads several schemas gets one
+  cross-file view (read points above). A transaction started by SQL text
+  (`BEGIN`, an outermost `SAVEPOINT`) does not; see the phase 4 known
+  limits.
 
 No binding writes transaction control as SQL text; all of them call the C
 ABI's begin, commit and rollback.
@@ -549,8 +558,8 @@ Each phase lands with its tests. Nothing ships outside
 
 **Phase 3 status (2026-11-27).** The format-15 storage contract, the CWAL
 open path and the transitions are in place in `-Dexperimental-cwal`
-builds, uncommitted. Cross-file transactions (phase 4) and maintenance
-(phase 5) are not.
+builds, landed in `a4432a5`. Cross-file transactions (phase 4) and
+maintenance (phase 5) were not part of it.
 
 - Retained format-14 fixtures, produced before format 15 was activated with
   the CLI built from the unmodified `v1.5.0` tag (`5d760d4`, `zova 1.5.0`,
@@ -669,6 +678,107 @@ builds, uncommitted. Cross-file transactions (phase 4) and maintenance
   the foreign-checkpoint test for the member-list read is phase 7.
 4. **Transactions.** Commit and read interception (§4) and the authorizer
    layer (§5).
+
+**Phase 4 status (2026-11-27).** Commit and read interception and the
+authorizer layer are in place in `-Dexperimental-cwal` builds.
+
+- `sqlite.Coordinator` (`src/sqlite.zig`): `cwal_set.open` installs it on the
+  connection with `sqlite3_set_clientdata`, so every `sqlite.Database`
+  wrapper over that connection finds it, including the wrappers that
+  extension and SQL-function code builds from the raw handle. SQLite frees
+  it when the connection closes.
+  - `commit` and `releaseSavepoint` call CWAL's `writeMarkers` before their
+    statement and `endCommit` after it; `Conn.commit` is now those two
+    halves around `COMMIT`. A release that does not commit (a nested
+    savepoint, or one inside a `BEGIN`) writes markers too. That only uses
+    up a transaction number; the later commit writes markers of its own.
+  - `begin` and `beginImmediate` on the writer start a deferred `BEGIN`
+    (§4). On a reader, `begin` is CWAL's `beginRead`, a read of every member
+    at one point between commits, and `beginImmediate` returns `ReadOnly`.
+    A failed `beginRead` returns the SQLite error it stopped on, or
+    `CommitSetBroken`.
+  - `savepoint` on a reader in autocommit mode is `beginReadAs` with the
+    `SAVEPOINT` statement in place of `BEGIN` (`sqlite3_snapshot_open` only
+    needs a transaction open, which an autocommit `SAVEPOINT` starts).
+    Inside a transaction it is a plain nested savepoint.
+  - Queries in autocommit mode on a reader: `Statement.step` asks the
+    coordinator before a query's first step (`begin_statement_read`); CWAL
+    opens `beginRead` and records the statement as its owner. The read ends
+    (`COMMIT`, which on a read-only transaction calls no commit hook) when
+    that statement returns done or an error, is reset or is finalized.
+    Statements the query runs meanwhile (SQL functions, virtual tables)
+    join that read. `exec` on a connection with a coordinator runs its SQL
+    one `Statement` at a time, so it takes the same path. A caller's
+    `begin` while a query holds its read adopts that read as the caller's
+    transaction; a `savepoint` then returns `Misuse` (releasing it would not
+    end the transaction), and `commit` returns `SqliteError`, as SQLite
+    does with no transaction open.
+  - A commit the commit hook refuses (`SQLITE_CONSTRAINT_COMMITHOOK`, after
+    which SQLite has rolled the transaction back) is mapped the same way
+    through `exec` and `Statement.step`: no markers → `Misuse` (use Zova's
+    transaction API), reader → `ReadOnly`, broken set → `CommitSetBroken`,
+    otherwise `Constraint`.
+  - `CommitSetBroken` is now also in `sqlite.Error`, so the coordinator can
+    return it. The Zova error set, their union, is unchanged.
+- Authorizer (§5): CWAL's authorizer stays installed for the life of the
+  handle. `sqlite.Database.setAuthorizer` sets an inner authorizer that runs
+  after CWAL's checks, with the schema and trigger names passed through;
+  clearing it leaves CWAL's checks. Setting it reinstalls CWAL's authorizer,
+  so SQLite expires the prepared statements and authorizes each again under
+  the new inner authorizer, as a plain `sqlite3_set_authorizer` would.
+  CWAL's own statements bypass both.
+- `VACUUM` was already refused, and needs no rule of its own:
+  `sqlite3RunVacuum` attaches its output (`ATTACH … AS vacuum_db`) through
+  the ordinary prepare path, which runs the authorizer's `SQLITE_ATTACH`
+  check, and CWAL denies every `ATTACH`. `VACUUM`, `VACUUM <store>` and
+  `VACUUM INTO` fail with `SqliteError` on the writer and on readers, write
+  no output file, and leave the set valid.
+- Backup: `backupTo` and `restoreBackupToMemory` on a CWAL set hold one Zova
+  read (`beginRead`) from the main page copy through the copies of the
+  stores, and `backupMainDatabaseReporting` starts its own source read with
+  `sqlite.Database.begin`, so it goes through the coordinator. The copy
+  inlines every store, so it is a plain standalone file: the backup clears
+  the CWAL `application_id` and removes main's marker table and protocol
+  key, which the page copy brought along. Without that, the copy failed to
+  open (CWAL recovery found markers for members it does not have).
+- CWAL prints SQLite errors to stderr only in test-hook builds.
+- Tests (`src/database_cwal_set_tests.zig`): an internal transaction, a
+  caller transaction and an outermost savepoint across main and the vector
+  store each write the same new marker, with both members in its mask, and
+  a single-file write writes none; a cross-file write committed by SQL text
+  returns `Misuse` and is rolled back, while single-file SQL transactions
+  commit; a reader's `begin` keeps both members at the state before a
+  writer's cross-file commit; an authorizer set through a fresh wrapper
+  re-authorizes a prepared statement, and setting or clearing it leaves the
+  marker-table and `journal_mode` denials. Follow-up tests: a reader
+  savepoint that reads main, then the store after a writer's cross-file
+  commit, sees neither half of it; an autocommit query on a reader whose
+  SQL function commits on the writer and then reads the store sees the
+  store before that commit; a backup taken while cross-file commits run
+  restores with each commit wholly present or absent; `VACUUM` as above; a
+  refused cross-file commit returns `Misuse` through `exec` and through a
+  prepared `COMMIT`.
+- Extension operations on a CWAL reader
+  (`src/extension_plugin_tests.zig`): a read-only open of a CWAL set with an
+  installed plugin that has a `register_sql` hook fails with `ReadOnly`.
+  Registration lifts `query_only` to create its TEMP generation table
+  (`extension_operations.zig`, `begin`), and that autocommit `CREATE TEMP
+  TABLE` is a write commit, which the reader's commit hook refuses. The
+  writer opens and registers normally. Not fixed (phase 5).
+- Known limits, each with its cause and what to do instead:
+  - Raw SQL `BEGIN IMMEDIATE` … `COMMIT` on the writer is refused, even for
+    a write to one table. `BEGIN IMMEDIATE` write-locks every member, so the
+    commit hook counts the commit as cross-file, and a raw `COMMIT` carries
+    no markers. Use Zova's `beginImmediate`, which starts deferred on the
+    writer and commits through the coordinator.
+  - Raw SQL `BEGIN` (or an outermost raw `SAVEPOINT`) on a reader has no
+    consistent view across members: SQLite starts each member's read when a
+    statement first touches it, and SQL text bypasses the coordinator. Use
+    Zova's read transaction (`begin`, or `savepoint`), which reads every
+    member at one commit.
+  - A reader refuses every write commit, including one that wrote only
+    TEMP tables: the commit hook refuses any commit on a reader before it
+    checks which files were written. Write TEMP tables on a writer handle.
 5. **Maintenance.** The §6 table, one operation at a time.
 6. **C ABI and bindings.** §10, with ABI and format decisions approved
    first.

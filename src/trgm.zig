@@ -452,6 +452,7 @@ fn salvageOperationalError(err: Error) extension_impl.Error {
         error.Interrupt => error.Interrupt,
         error.ReadOnly => error.ReadOnly,
         error.Corrupt => error.Corrupt,
+        error.CommitSetBroken => error.CommitSetBroken,
         error.OutOfMemory => error.OutOfMemory,
         error.ExtensionInvalid, error.TrgmInvalid, error.TrgmIndexNotFound, error.TrgmDocumentNotFound => error.ExtensionInvalid,
     };

@@ -233,3 +233,352 @@ test "a disable stopped at each step leaves a state the next open completes or k
         try std.testing.expectEqual(@as(i64, 1), try queryCount(&db, "select count(*) from t"));
     }
 }
+
+/// Row 0 of a member's marker table: the last cross-file transaction that
+/// wrote it, and that transaction's member set.
+fn marker(db: *Database, comptime schema: []const u8) ![2]i64 {
+    var stmt = try db.sqlite_db.prepare("select txn, mask from " ++ schema ++ "._zova_cwal_marker where k = 0");
+    defer stmt.deinit();
+    try std.testing.expect(try stmt.step() == .row);
+    return .{ stmt.columnInt64(0), stmt.columnInt64(1) };
+}
+
+/// Both members carry the same new marker, for main and the vector store.
+fn expectNewMarker(db: *Database, previous: i64) !i64 {
+    const main_marker = try marker(db, "main");
+    try std.testing.expectEqual(main_marker, try marker(db, "vector_store"));
+    try std.testing.expectEqual(@as(i64, 0b11), main_marker[1]);
+    try std.testing.expect(main_marker[0] > previous);
+    return main_marker[0];
+}
+
+test "Zova's commit points write markers in every member a transaction writes" {
+    if (!cwal_set.available) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var paths: Paths = .{};
+    try paths.init(&tmp);
+    try createCwalSet(&paths);
+
+    {
+        var db = try Database.open(paths.main);
+        defer db.deinit();
+        // An internal immediate transaction: the collection and main's
+        // bound-store epoch.
+        try db.createVectorCollection("v", .{ .dimensions = 2, .metric = .l2 });
+        var txn = try expectNewMarker(&db, 0);
+
+        // A caller transaction, committed.
+        try db.begin();
+        try db.exec("insert into t values (1)");
+        try db.putVector("v", "a", .{ .f32 = &.{ 1, 2 } });
+        try db.commit();
+        txn = try expectNewMarker(&db, txn);
+
+        // An outermost savepoint, released.
+        try db.savepoint("outer");
+        try db.exec("insert into t values (2)");
+        try db.putVector("v", "b", .{ .f32 = &.{ 3, 4 } });
+        try db.releaseSavepoint("outer");
+        txn = try expectNewMarker(&db, txn);
+
+        // A single-file write needs no markers.
+        try db.exec("insert into t values (3)");
+        try std.testing.expectEqual(txn, (try marker(&db, "main"))[0]);
+    }
+    var db = try Database.open(paths.main);
+    defer db.deinit();
+    try std.testing.expectEqual(@as(i64, 3), try queryCount(&db, "select count(*) from t"));
+    try std.testing.expect(try db.hasVector("v", "a"));
+    try std.testing.expect(try db.hasVector("v", "b"));
+}
+
+test "a cross-file write committed by SQL text is refused and rolled back" {
+    if (!cwal_set.available) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var paths: Paths = .{};
+    try paths.init(&tmp);
+    try createCwalSet(&paths);
+
+    var db = try Database.open(paths.main);
+    defer db.deinit();
+    try db.createVectorCollection("v", .{ .dimensions = 2, .metric = .l2 });
+    try db.exec("begin");
+    try db.exec("insert into t values (1)");
+    try db.putVector("v", "a", .{ .f32 = &.{ 1, 2 } });
+    try std.testing.expectError(error.Misuse, db.exec("commit"));
+    try std.testing.expect(sqlite.c.sqlite3_get_autocommit(db.sqlite_db.handle) != 0);
+    try std.testing.expectEqual(@as(i64, 0), try queryCount(&db, "select count(*) from t"));
+    try std.testing.expect(!try db.hasVector("v", "a"));
+
+    // Single-file transactions in SQL text commit as before.
+    try db.exec("begin; insert into t values (2); commit");
+    try std.testing.expectEqual(@as(i64, 1), try queryCount(&db, "select count(*) from t"));
+}
+
+test "a reader's transaction sees every member at one commit" {
+    if (!cwal_set.available) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var paths: Paths = .{};
+    try paths.init(&tmp);
+    try createCwalSet(&paths);
+
+    var db = try Database.open(paths.main);
+    defer db.deinit();
+    try db.createVectorCollection("v", .{ .dimensions = 2, .metric = .l2 });
+    var reader = try Database.openWithOptions(paths.main, .{ .read_only = true });
+    defer reader.deinit();
+    try std.testing.expectError(error.ReadOnly, reader.beginImmediate());
+
+    try reader.begin();
+    try db.begin();
+    try db.exec("insert into t values (1)");
+    try db.putVector("v", "a", .{ .f32 = &.{ 1, 2 } });
+    try db.commit();
+    // The reader's transaction started before that commit, on both members.
+    try std.testing.expect(!try reader.hasVector("v", "a"));
+    try std.testing.expectEqual(@as(i64, 0), try queryCount(&reader, "select count(*) from t"));
+    try reader.commit();
+    try std.testing.expect(try reader.hasVector("v", "a"));
+    try std.testing.expectEqual(@as(i64, 1), try queryCount(&reader, "select count(*) from t"));
+}
+
+var inner_calls: usize = 0;
+
+/// Denies inserts into `t`, counting every call.
+fn denyInsertsIntoT(_: ?*anyopaque, action: c_int, first: [*c]const u8, _: [*c]const u8, _: [*c]const u8, _: [*c]const u8) callconv(.c) c_int {
+    inner_calls += 1;
+    if (action == sqlite.c.SQLITE_INSERT and first != null and std.mem.eql(u8, std.mem.span(first), "t")) return sqlite.c.SQLITE_DENY;
+    return sqlite.c.SQLITE_OK;
+}
+
+test "an authorizer set on a CWAL handle runs after CWAL's checks, which stay" {
+    if (!cwal_set.available) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var paths: Paths = .{};
+    try paths.init(&tmp);
+    try createCwalSet(&paths);
+
+    var db = try Database.open(paths.main);
+    defer db.deinit();
+    const marker_write = "update main._zova_cwal_marker set txn = 0 where k = 0";
+    try std.testing.expectError(error.SqliteError, db.exec(marker_write));
+
+    // A statement prepared before the authorizer changes is authorized
+    // again when it next runs.
+    var insert = try db.sqlite_db.prepare("insert into t values (1)");
+    defer insert.deinit();
+    inner_calls = 0;
+    // Through a fresh wrapper, as extension code builds one.
+    var wrapper: sqlite.Database = .{ .handle = db.sqlite_db.handle };
+    try wrapper.setAuthorizer(denyInsertsIntoT, null);
+    try std.testing.expectError(error.SqliteError, insert.step());
+    try std.testing.expect(inner_calls > 0);
+    try std.testing.expectError(error.SqliteError, db.exec(marker_write));
+    try std.testing.expectEqual(@as(i64, 0), try queryCount(&db, "select count(*) from t"));
+
+    try wrapper.setAuthorizer(null, null);
+    insert.reset() catch {};
+    try std.testing.expect(try insert.step() == .done);
+    try std.testing.expectError(error.SqliteError, db.exec(marker_write));
+    try std.testing.expectError(error.SqliteError, db.exec("pragma journal_mode = delete"));
+    try std.testing.expectEqual(@as(i64, 1), try queryCount(&db, "select count(*) from t"));
+}
+
+/// One cross-file transaction on the writer: row `i` in `t` and vector `i`.
+fn crossCommit(db: *Database, i: u32) !void {
+    var sql_buffer: [64]u8 = undefined;
+    var id_buffer: [16]u8 = undefined;
+    try db.begin();
+    errdefer db.rollback() catch {};
+    try db.exec(try std.fmt.bufPrintSentinel(&sql_buffer, "insert into t values ({d})", .{i}, 0));
+    try db.putVector("v", try std.fmt.bufPrint(&id_buffer, "{d}", .{i}), .{ .f32 = &.{ 1, 2 } });
+    try db.commit();
+}
+
+/// Whether row `i` of `t` and vector `i` are both present or both absent.
+fn expectWhole(db: *Database, i: u32) !bool {
+    var sql_buffer: [64]u8 = undefined;
+    var id_buffer: [16]u8 = undefined;
+    const row = try queryCount(db, try std.fmt.bufPrintSentinel(&sql_buffer, "select count(*) from t where x = {d}", .{i}, 0)) == 1;
+    const vector = try db.hasVector("v", try std.fmt.bufPrint(&id_buffer, "{d}", .{i}));
+    try std.testing.expectEqual(row, vector);
+    return row;
+}
+
+test "a reader savepoint reads every member at one commit" {
+    if (!cwal_set.available) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var paths: Paths = .{};
+    try paths.init(&tmp);
+    try createCwalSet(&paths);
+
+    var db = try Database.open(paths.main);
+    defer db.deinit();
+    try db.createVectorCollection("v", .{ .dimensions = 2, .metric = .l2 });
+    var reader = try Database.openWithOptions(paths.main, .{ .read_only = true });
+    defer reader.deinit();
+
+    try reader.savepoint("r");
+    // Reading main first: SQLite would start the store's read only later.
+    try std.testing.expectEqual(@as(i64, 0), try queryCount(&reader, "select count(*) from t"));
+    try crossCommit(&db, 1);
+    try std.testing.expect(!try expectWhole(&reader, 1));
+    try reader.releaseSavepoint("r");
+    try std.testing.expect(try expectWhole(&reader, 1));
+}
+
+var peek_writer: ?*Database = null;
+var peek_reader: ?*Database = null;
+
+/// SQL function for the test below: commit a cross-file transaction on the
+/// writer, then report whether the reader sees its vector. The statement
+/// that calls it has already started its read of main.
+fn commitThenPeek(context: ?*sqlite.c.sqlite3_context, _: c_int, _: [*c]?*sqlite.c.sqlite3_value) callconv(.c) void {
+    crossCommit(peek_writer.?, 1) catch return sqlite.c.sqlite3_result_error(context, "commit failed", -1);
+    const seen = peek_reader.?.hasVector("v", "1") catch return sqlite.c.sqlite3_result_error(context, "peek failed", -1);
+    sqlite.c.sqlite3_result_int(context, @intFromBool(seen));
+}
+
+test "an autocommit select on a reader reads every member at one commit" {
+    if (!cwal_set.available) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var paths: Paths = .{};
+    try paths.init(&tmp);
+    try createCwalSet(&paths);
+
+    var db = try Database.open(paths.main);
+    defer db.deinit();
+    try db.createVectorCollection("v", .{ .dimensions = 2, .metric = .l2 });
+    var reader = try Database.openWithOptions(paths.main, .{ .read_only = true });
+    defer reader.deinit();
+    peek_writer = &db;
+    peek_reader = &reader;
+    defer peek_writer = null;
+    defer peek_reader = null;
+    try std.testing.expectEqual(sqlite.c.SQLITE_OK, sqlite.c.sqlite3_create_function_v2(reader.sqlite_db.handle, "cwal_test_commit_then_peek", 0, sqlite.c.SQLITE_UTF8, null, commitThenPeek, null, null, null));
+
+    var stmt = try reader.sqlite_db.prepare("select (select count(*) from main.t), cwal_test_commit_then_peek()");
+    defer stmt.deinit();
+    try std.testing.expect(try stmt.step() == .row);
+    try std.testing.expectEqual(@as(i64, 0), stmt.columnInt64(0));
+    try std.testing.expectEqual(@as(i64, 0), stmt.columnInt64(1));
+    try std.testing.expect(try stmt.step() == .done);
+    try std.testing.expect(sqlite.c.sqlite3_get_autocommit(reader.sqlite_db.handle) != 0);
+    try std.testing.expect(try expectWhole(&reader, 1));
+}
+
+const BackupCommits = struct {
+    writer: *Database,
+    next: u32 = 0,
+
+    fn report(context: ?*anyopaque, progress: @import("database/types.zig").Progress) zova.Error!void {
+        const self: *BackupCommits = @ptrCast(@alignCast(context.?));
+        if (progress.phase != .copy) return;
+        crossCommit(self.writer, self.next) catch return error.SqliteError;
+        self.next += 1;
+    }
+};
+
+test "a backup taken during cross-file commits holds each commit whole" {
+    if (!cwal_set.available) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var paths: Paths = .{};
+    try paths.init(&tmp);
+    try createCwalSet(&paths);
+    var backup_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const backup_path = try testingDbPath(&backup_buffer, tmp.sub_path[0..], "backup.zova");
+
+    var db = try Database.open(paths.main);
+    defer db.deinit();
+    try db.createVectorCollection("v", .{ .dimensions = 2, .metric = .l2 });
+    var commits: BackupCommits = .{ .writer = &db };
+    try crossCommit(&db, commits.next);
+    commits.next += 1;
+    {
+        var reader = try Database.openWithOptions(paths.main, .{ .read_only = true });
+        defer reader.deinit();
+        try reader.backupTo(backup_path, .{ .progress = .{ .context = &commits, .report = BackupCommits.report } });
+    }
+    // Commits ran while the copy was in progress.
+    try std.testing.expect(commits.next > 2);
+
+    var copy = try Database.open(backup_path);
+    defer copy.deinit();
+    var present: u32 = 0;
+    for (0..commits.next) |i| present += @intFromBool(try expectWhole(&copy, @intCast(i)));
+    try std.testing.expect(present >= 1);
+}
+
+test "VACUUM on a CWAL handle fails and leaves the set valid" {
+    if (!cwal_set.available) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var paths: Paths = .{};
+    try paths.init(&tmp);
+    try createCwalSet(&paths);
+    var into_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const into_path = try testingDbPath(&into_buffer, tmp.sub_path[0..], "into.zova");
+    var into_sql_buffer: [std.fs.max_path_bytes + 32]u8 = undefined;
+    const into_sql = try std.fmt.bufPrintSentinel(&into_sql_buffer, "vacuum into '{s}'", .{into_path}, 0);
+
+    {
+        var db = try Database.open(paths.main);
+        defer db.deinit();
+        try db.createVectorCollection("v", .{ .dimensions = 2, .metric = .l2 });
+        try crossCommit(&db, 1);
+        try std.testing.expectError(error.SqliteError, db.exec("vacuum"));
+        try std.testing.expectError(error.SqliteError, db.exec("vacuum vector_store"));
+        try std.testing.expectError(error.SqliteError, db.exec(into_sql));
+        try std.testing.expect(sqlite.c.sqlite3_get_autocommit(db.sqlite_db.handle) != 0);
+        var reader = try Database.openWithOptions(paths.main, .{ .read_only = true });
+        defer reader.deinit();
+        try std.testing.expectError(error.SqliteError, reader.exec("vacuum"));
+        try std.testing.expectError(error.SqliteError, reader.exec(into_sql));
+    }
+    try std.testing.expect(std.c.access(into_path.ptr, 0) != 0);
+    try expectCwal(&paths);
+    var db = try Database.open(paths.main);
+    defer db.deinit();
+    try std.testing.expect(try expectWhole(&db, 1));
+    for ([_][:0]const u8{ "pragma main.integrity_check", "pragma vector_store.integrity_check" }) |sql| {
+        var check = try db.sqlite_db.prepare(sql);
+        defer check.deinit();
+        try std.testing.expect(try check.step() == .row);
+        try std.testing.expectEqualStrings("ok", check.columnText(0));
+    }
+    try crossCommit(&db, 2);
+}
+
+test "a refused cross-file commit returns Misuse through exec and through a statement" {
+    if (!cwal_set.available) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var paths: Paths = .{};
+    try paths.init(&tmp);
+    try createCwalSet(&paths);
+
+    var db = try Database.open(paths.main);
+    defer db.deinit();
+    try db.createVectorCollection("v", .{ .dimensions = 2, .metric = .l2 });
+    for (0..2) |way| {
+        try db.exec("begin");
+        try db.exec("insert into t values (1)");
+        try db.putVector("v", "1", .{ .f32 = &.{ 1, 2 } });
+        if (way == 0) {
+            try std.testing.expectError(error.Misuse, db.exec("commit"));
+        } else {
+            var commit = try db.sqlite_db.prepare("commit");
+            defer commit.deinit();
+            try std.testing.expectError(error.Misuse, commit.step());
+        }
+        try std.testing.expect(sqlite.c.sqlite3_get_autocommit(db.sqlite_db.handle) != 0);
+        try std.testing.expect(!try expectWhole(&db, 1));
+    }
+}

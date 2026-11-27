@@ -1883,12 +1883,22 @@ pub const Database = struct {
         errdefer deleteDestinationFile(destination_path);
 
         {
+            // A CWAL set: one read of every member at one commit, held from
+            // the main copy through the store copies.
+            const read_scope = if (self.cwal_conn != null) try self.beginRead() else false;
+            defer self.endRead(read_scope);
+            {
+                var dest = try sqlite.Database.open(destination_path);
+                defer dest.deinit();
+                try backupMainDatabaseReporting(&self.sqlite_db, &dest, options.progress, .main);
+            }
+            try self.inlineBoundStoresIntoDestination(destination_path, options.progress);
+        }
+        if (self.cwal_conn != null) {
             var dest = try sqlite.Database.open(destination_path);
             defer dest.deinit();
-            try backupMainDatabaseReporting(&self.sqlite_db, &dest, options.progress, .main);
+            try clearCommitProtocol(&dest);
         }
-
-        try self.inlineBoundStoresIntoDestination(destination_path, options.progress);
         if (options.verify) try verifyOperationalCopyReporting(destination_path, self.extension_registry, options.progress);
     }
 
@@ -1901,9 +1911,15 @@ pub const Database = struct {
     fn restoreIntoMemory(self: *Database, registry: ExtensionRegistry) Error!Database {
         var raw = try sqlite.Database.open(":memory:");
         errdefer raw.deinit();
-        try backupMainDatabase(&self.sqlite_db, &raw);
-        try @import("vector_maintenance.zig").register(&raw);
-        try self.inlineBoundStoresIntoDatabase(&raw, null);
+        {
+            // See `backupTo`.
+            const read_scope = if (self.cwal_conn != null) try self.beginRead() else false;
+            defer self.endRead(read_scope);
+            try backupMainDatabase(&self.sqlite_db, &raw);
+            try @import("vector_maintenance.zig").register(&raw);
+            try self.inlineBoundStoresIntoDatabase(&raw, null);
+        }
+        if (self.cwal_conn != null) try clearCommitProtocol(&raw);
         try enableForeignKeys(&raw);
         try vector_sql.register(&raw);
         try graph_sql.register(&raw);
@@ -2917,6 +2933,13 @@ pub const Database = struct {
         if (hasActiveTransaction(&self.sqlite_db)) {
             return error.ObjectTransactionActive;
         }
+    }
+
+    /// A copy of a CWAL set holds every store inline, so it is a plain
+    /// standalone file: clear the flag and the markers it copied from main.
+    fn clearCommitProtocol(copy: *sqlite.Database) Error!void {
+        try copy.exec("pragma main.application_id = 0");
+        try commit_protocol.removeLeftovers(copy, &.{"main"});
     }
 
     fn inlineBoundStoresIntoDestination(self: *Database, destination_path: [:0]const u8, progress: ?ProgressCallback) Error!void {

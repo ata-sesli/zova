@@ -148,7 +148,138 @@ pub fn open(path: [:0]const u8, options: OpenOptions) Error!*Conn {
         .require_markers = true,
     };
     if (options.busy_timeout_ms != 0) cwal_options.busy_timeout_ms = std.math.cast(c_int, options.busy_timeout_ms) orelse std.math.maxInt(c_int);
-    return cwal.Conn.open(member_paths[0..members.len], cwal_options) catch |err| mapError(err);
+    const conn = cwal.Conn.open(member_paths[0..members.len], cwal_options) catch |err| return mapError(err);
+    errdefer conn.close();
+    const coordinator = try allocator.create(sqlite.Coordinator);
+    coordinator.* = .{
+        .context = conn,
+        .begin = begin,
+        .prepare_commit = prepareCommit,
+        .end_commit = endCommit,
+        .commit_refused = commitRefused,
+        .set_authorizer = setAuthorizer,
+        .savepoint = savepoint,
+        .begin_statement_read = beginStatementRead,
+        .end_statement_read = endStatementRead,
+    };
+    var db = connection(conn);
+    db.setCoordinator(coordinator, destroyCoordinator) catch |err| {
+        allocator.destroy(coordinator);
+        return err;
+    };
+    return conn;
+}
+
+// The transaction layer of a CWAL handle (notes/cwal-integration-260.md §4,
+// §5), installed on its connection: `sqlite.Database` routes `begin`,
+// `beginImmediate`, `commit`, `savepoint`, `releaseSavepoint`,
+// `setAuthorizer` and the start and end of every query here.
+
+fn connFrom(context: *anyopaque) *Conn {
+    return @ptrCast(@alignCast(context));
+}
+
+/// A failed CWAL step: the SQLite error it stopped on, when there is one.
+fn stepError(conn: *Conn, err: anyerror) sqlite.Error {
+    return switch (err) {
+        error.Sqlite => @errorCast(mapSqliteResultCode(sqlite.c.sqlite3_extended_errcode(conn.db))),
+        error.Broken => error.CommitSetBroken,
+        error.Io => error.CantOpen,
+        else => error.SqliteError,
+    };
+}
+
+/// The writer is the set's only writer, so taking the write lock up front
+/// gains nothing, and `BEGIN IMMEDIATE` would write-lock every member: each
+/// commit would count as cross-file and write markers everywhere. Its
+/// transactions start deferred and lock only the members they write. A
+/// reader's transaction reads every member at one point between commits.
+fn begin(context: *anyopaque, immediate: bool) sqlite.Error!void {
+    const conn = connFrom(context);
+    var db = connection(conn);
+    if (conn.role == .writer) return db.exec("begin");
+    if (immediate) return error.ReadOnly;
+    // A query still holds the read it started in autocommit mode: that
+    // read becomes the caller's transaction.
+    if (adoptStatementRead(conn)) return;
+    conn.beginRead(0) catch |err| return stepError(conn, err);
+}
+
+/// A savepoint that starts a reader's transaction opens the same
+/// consistent read as `begin`, with the savepoint as its first statement.
+fn savepoint(context: *anyopaque, sql: [:0]const u8) sqlite.Error!void {
+    const conn = connFrom(context);
+    var db = connection(conn);
+    if (conn.role == .writer or sqlite.c.sqlite3_get_autocommit(conn.db) == 0) {
+        // Inside a query's own read, releasing this savepoint would not end
+        // the transaction, and that query's end would release it early.
+        if (conn.role == .reader and conn.statement_read != null) return error.Misuse;
+        return db.exec(sql);
+    }
+    conn.statement_read = null;
+    conn.beginReadAs(0, sql) catch |err| return stepError(conn, err);
+}
+
+/// On a reader, before the first step of a query in autocommit mode: SQLite
+/// would start each member's read as the query reaches it, so a commit can
+/// land between them. Read every member at one point instead, in a
+/// transaction that ends with the query.
+fn beginStatementRead(context: *anyopaque, statement: *sqlite.c.sqlite3_stmt) sqlite.Error!void {
+    const conn = connFrom(context);
+    if (conn.role == .writer) return;
+    conn.beginRead(0) catch |err| return stepError(conn, err);
+    conn.statement_read = statement;
+}
+
+fn endStatementRead(context: *anyopaque, statement: *sqlite.c.sqlite3_stmt) void {
+    const conn = connFrom(context);
+    if (conn.statement_read != @as(?*anyopaque, statement)) return;
+    conn.statement_read = null;
+    // The transaction only read: a failed commit loses nothing.
+    if (sqlite.c.sqlite3_get_autocommit(conn.db) == 0) conn.exec("commit") catch conn.rollbackOpen();
+}
+
+/// Hand a query's open read to the caller. False when there is none (a
+/// recorded owner whose transaction already ended is cleared).
+fn adoptStatementRead(conn: *Conn) bool {
+    if (conn.statement_read == null) return false;
+    conn.statement_read = null;
+    return sqlite.c.sqlite3_get_autocommit(conn.db) == 0;
+}
+
+fn prepareCommit(context: *anyopaque) sqlite.Error!void {
+    const conn = connFrom(context);
+    if (conn.role != .writer) {
+        // The open transaction is a query's own read, not the caller's: as
+        // without CWAL, there is no transaction to commit.
+        if (conn.statement_read != null and sqlite.c.sqlite3_get_autocommit(conn.db) == 0) return error.SqliteError;
+        return;
+    }
+    conn.writeMarkers() catch |err| return stepError(conn, err);
+}
+
+fn endCommit(context: *anyopaque) void {
+    connFrom(context).endCommit();
+}
+
+/// A cross-file commit that did not come through `prepareCommit` (SQL text
+/// `COMMIT`, `END` or `RELEASE`, or a statement that autocommits writes to
+/// two members) carries no markers: `Misuse`, use Zova's transaction API.
+fn commitRefused(context: *anyopaque) sqlite.Error {
+    const conn = connFrom(context);
+    defer conn.violation = false;
+    if (conn.role != .writer) return error.ReadOnly;
+    if (conn.isBroken()) return error.CommitSetBroken;
+    if (conn.violation) return error.Misuse;
+    return error.Constraint;
+}
+
+fn setAuthorizer(context: *anyopaque, callback: ?sqlite.Authorizer, user: ?*anyopaque) void {
+    connFrom(context).setInnerAuthorizer(callback, user);
+}
+
+fn destroyCoordinator(value: ?*anyopaque) callconv(.c) void {
+    allocator.destroy(@as(*sqlite.Coordinator, @ptrCast(@alignCast(value.?))));
 }
 
 /// The SQLite connection a CWAL handle owns.

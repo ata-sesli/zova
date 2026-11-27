@@ -648,6 +648,45 @@ test "extension_plugin operation registration preserves query-only bound-store p
     try std.testing.expectEqual(@as(i64, 42), try scalarValue(&writable.sqlite_db, "select zova_c_test_plus_one(41)"));
 }
 
+// Records what operation registration does on a CWAL reader, where it lifts
+// query_only to write its TEMP generation table (extension_operations.zig,
+// TemporaryWriteScope); notes/cwal-integration-260.md §11, phase 4.
+test "extension_plugin operation registration on a CWAL reader" {
+    if (!@import("database/cwal_set.zig").available) return error.SkipZigTest;
+    const zova = @import("zova.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const testingDbPath = @import("zova_test_support.zig").testingDbPath;
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    var graphs_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main = try testingDbPath(&main_buffer, tmp.sub_path[0..], "main.zova");
+    const graphs = try testingDbPath(&graphs_buffer, tmp.sub_path[0..], "graphs.zova");
+    try zova.createGraphStore(graphs);
+    var d = descriptor();
+    d.register_sql = registerOperations;
+    const ext = try plugin.validate(&d);
+    const registry: extension.Registry = .{ .extensions = &.{ext}, .plugins = &.{d} };
+    {
+        var db = try zova.Database.createWithExtensions(main, registry);
+        defer db.deinit();
+        try db.bindGraphStore(graphs);
+        try db.createGraph("source");
+        try db.installExtension("c_test");
+        _ = try db.setJournalMode(.wal);
+    }
+    {
+        var db = try zova.Database.openWithOptionsAndExtensions(main, .{}, registry);
+        defer db.deinit();
+        try db.setCommitProtocol(.cwal);
+    }
+    try std.testing.expectError(error.ReadOnly, zova.Database.openWithOptionsAndExtensions(main, .{ .read_only = true }, registry));
+    // The writer still opens and registers the operation.
+    var db = try zova.Database.openWithOptionsAndExtensions(main, .{}, registry);
+    defer db.deinit();
+    try std.testing.expectEqual(zova.Database.CommitProtocol.cwal, db.commitProtocol());
+    try std.testing.expectEqual(@as(i64, 42), try scalarValue(&db.sqlite_db, "select zova_c_test_plus_one(41)"));
+}
+
 test "extension_plugin scalar writes are atomic and read-only operations cannot mutate" {
     var db = try @import("zova.zig").Database.createMemory();
     defer db.deinit();
