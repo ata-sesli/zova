@@ -1,0 +1,6 @@
+kernel: Linux 7.2.15-300.fc45.x86_64 x86_64
+cpu: Intel(R) Core(TM) i7-6700HQ CPU @ 2.60GHz (8 threads)
+memory: 11 GiB
+zig: 0.17.0
+python: Python 3.15.0
+tmpfs: tmpfs rw,nosuid,nodev,seclabel,size=6059652k,nr_inodes=1048576,inode64,usrquota

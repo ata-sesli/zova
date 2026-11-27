@@ -963,8 +963,9 @@ fn walChecksum(big: bool, bytes: []const u8, s: *[2]u32) void {
     }
 }
 
-/// `page_frame` is the offset of the commit's last frame for `page`.
-const LastCommit = struct { start: i64, writes_page: bool, page_frame: i64 = 0 };
+/// `page_frame` is the offset of the commit's last frame for `page`; `end` is
+/// the offset just past the commit's last frame.
+const LastCommit = struct { start: i64, end: i64 = 0, writes_page: bool, page_frame: i64 = 0 };
 
 /// The last commit in the WAL behind `fd`: the offset at which it starts (the
 /// end of the commit before it, or the end of the header if it is the only
@@ -1012,7 +1013,7 @@ fn walLastCommit(fd: c_int, page: u32) ?LastCommit {
             group_writes = false;
         }
     }
-    return if (last != null) .{ .start = prev, .writes_page = last_writes, .page_frame = last_frame } else null;
+    return if (last) |end| .{ .start = prev, .end = end, .writes_page = last_writes, .page_frame = last_frame } else null;
 }
 
 /// `root` is the marker table's root page, which every marker update writes.
@@ -1123,17 +1124,86 @@ fn pageCheckpointed(db: ?*c.sqlite3, path: [:0]const u8, wal_fd: c_int, page: u3
     defer std.heap.c_allocator.free(buf);
     if (sys.pread(wal_fd, buf.ptr, page_size, frame + wal_frame_header_size) != page_size) return error.Io;
     const at: i64 = @as(i64, page - 1) * @as(i64, @intCast(page_size));
+    if (!try readDatabase(db, path, buf[page_size..], at)) return false;
+    return std.mem.eql(u8, buf[0..page_size], buf[page_size..]);
+}
+
+/// Read `buf.len` bytes of the database file at `at`; false on a short read.
+/// With `db` (a lockForRepair handle) it reads through that handle's file,
+/// as `pageCheckpointed` explains.
+fn readDatabase(db: ?*c.sqlite3, path: [:0]const u8, buf: []u8, at: i64) Error!bool {
     if (db) |d| {
         var file: ?*c.sqlite3_file = null;
         if (c.sqlite3_file_control(d, "main", c.SQLITE_FCNTL_FILE_POINTER, @ptrCast(&file)) != c.SQLITE_OK or file == null) return error.Io;
-        if (file.?.pMethods.*.xRead.?(file, buf[page_size..].ptr, @intCast(page_size), at) != c.SQLITE_OK) return false;
-    } else {
-        const fd = sys.open(path.ptr, sys.O_RDONLY | sys.O_CLOEXEC);
-        if (fd < 0) return error.Io;
-        defer _ = sys.close(fd);
-        if (sys.pread(fd, buf[page_size..].ptr, page_size, at) != page_size) return false;
+        return file.?.pMethods.*.xRead.?(file, buf.ptr, @intCast(buf.len), at) == c.SQLITE_OK;
     }
-    return std.mem.eql(u8, buf[0..page_size], buf[page_size..]);
+    const fd = sys.open(path.ptr, sys.O_RDONLY | sys.O_CLOEXEC);
+    if (fd < 0) return error.Io;
+    defer _ = sys.close(fd);
+    return sys.pread(fd, buf.ptr, buf.len, at) == buf.len;
+}
+
+/// Whether a checkpointer copied a page of the torn commit (WAL frames
+/// `start`..`end`) whose previous version exists nowhere else: no frame
+/// before `start` holds that page, so the database file held the only
+/// copy. Recovery cannot roll such a page back. A copied page that does
+/// have an earlier frame is harmless: after truncation that frame is the
+/// newest copy in the WAL, readers use it, and the next checkpoint (with
+/// nBackfill reset by the rebuilt -shm) writes it over the file.
+///
+/// This catches a checkpointer that died after a partial copy, before the
+/// marker page (`pageCheckpointed`) and before advancing nBackfill
+/// (`backfilledPast`). Pages past the kept database size are ignored:
+/// nothing committed refers to them. A torn page that SQLite rewrote with
+/// unchanged content compares equal and refuses the open, a safe false
+/// positive. Runs only when recovery repairs a torn set.
+fn tornPageCheckpointed(db: ?*c.sqlite3, path: [:0]const u8, wal_fd: c_int, start: i64, end: i64) Error!bool {
+    const allocator = std.heap.c_allocator;
+    var header: [wal_header_size]u8 = undefined;
+    if (sys.pread(wal_fd, &header, header.len, 0) != header.len) return error.Io;
+    const page_size: usize = std.mem.readInt(u32, header[8..12], .big);
+    const frame_size: i64 = wal_frame_header_size + @as(i64, @intCast(page_size));
+    // Pages with an earlier copy in the WAL, and the database size after
+    // the last kept commit.
+    var earlier: std.AutoHashMapUnmanaged(u32, void) = .empty;
+    defer earlier.deinit(allocator);
+    var kept_pages: u32 = 0;
+    var fh: [wal_frame_header_size]u8 = undefined;
+    var offset: i64 = wal_header_size;
+    while (offset < start) : (offset += frame_size) {
+        if (sys.pread(wal_fd, &fh, fh.len, offset) != fh.len) return error.Io;
+        earlier.put(allocator, std.mem.readInt(u32, fh[0..4], .big), {}) catch return error.Io;
+        const commit_pages = std.mem.readInt(u32, fh[4..8], .big);
+        if (commit_pages != 0) kept_pages = commit_pages;
+    }
+    // The torn commit's newest frame per page without an earlier copy.
+    var torn: std.AutoHashMapUnmanaged(u32, i64) = .empty;
+    defer torn.deinit(allocator);
+    offset = start;
+    while (offset < end) : (offset += frame_size) {
+        if (sys.pread(wal_fd, &fh, fh.len, offset) != fh.len) return error.Io;
+        const page = std.mem.readInt(u32, fh[0..4], .big);
+        if (!earlier.contains(page)) torn.put(allocator, page, offset) catch return error.Io;
+    }
+    if (torn.count() == 0) return false;
+    // With no kept commit in the WAL, the database file's header holds the
+    // kept size, unless page 1 itself was copied, which the loop below
+    // catches. 0 when unknown: no page is skipped.
+    if (kept_pages == 0) {
+        var db_header: [100]u8 = undefined;
+        if (try readDatabase(db, path, &db_header, 0)) kept_pages = std.mem.readInt(u32, db_header[28..32], .big);
+    }
+    const buf = allocator.alloc(u8, 2 * page_size) catch return error.Io;
+    defer allocator.free(buf);
+    var it = torn.iterator();
+    while (it.next()) |entry| {
+        const page = entry.key_ptr.*;
+        if (kept_pages != 0 and page > kept_pages) continue;
+        if (sys.pread(wal_fd, buf.ptr, page_size, entry.value_ptr.* + wal_frame_header_size) != page_size) return error.Io;
+        const at: i64 = @as(i64, page - 1) * @as(i64, @intCast(page_size));
+        if (try readDatabase(db, path, buf[page_size..], at) and std.mem.eql(u8, buf[0..page_size], buf[page_size..])) return true;
+    }
+    return false;
 }
 
 fn markerOf(db: ?*c.sqlite3) Error!Marker {
@@ -1829,7 +1899,8 @@ pub const Conn = struct {
                 if (!fault.mutated("no-backfill-check") and (!last.writes_page or
                     backfilledPast(conn.shm_heads[i], fds[i], last.start) or
                     backfilledPast(readShmHead(conn.paths[i]), fds[i], last.start) or
-                    (!fault.mutated("no-root-check") and try pageCheckpointed(locks[i], conn.paths[i], fds[i], markers[i].root, last.page_frame))))
+                    (!fault.mutated("no-root-check") and try pageCheckpointed(locks[i], conn.paths[i], fds[i], markers[i].root, last.page_frame)) or
+                    (!fault.mutated("no-torn-page-check") and try tornPageCheckpointed(locks[i], conn.paths[i], fds[i], last.start, last.end))))
                 {
                     conn.log("recover member {d}: torn commit already checkpointed", .{i});
                     return error.ProtocolViolation;

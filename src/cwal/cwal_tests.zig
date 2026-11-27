@@ -46,6 +46,15 @@ fn count(conn: *cwal.Conn, comptime sql: [:0]const u8) !i64 {
     return c.sqlite3_column_int64(stmt, 0);
 }
 
+/// `pragma integrity_check` over every attached member reports "ok".
+fn integrityOk(conn: *cwal.Conn) !bool {
+    var stmt: ?*c.sqlite3_stmt = null;
+    if (c.sqlite3_prepare_v2(conn.db, "pragma integrity_check", -1, &stmt, null) != c.SQLITE_OK) return error.Sqlite;
+    defer _ = c.sqlite3_finalize(stmt);
+    if (c.sqlite3_step(stmt) != c.SQLITE_ROW) return error.Sqlite;
+    return std.mem.eql(u8, std.mem.span(c.sqlite3_column_text(stmt, 0)), "ok");
+}
+
 fn crossCommit(conn: *cwal.Conn, k: i64) !void {
     var buf: [160]u8 = undefined;
     try conn.exec("begin");
@@ -246,6 +255,93 @@ test "recovery rolls back a cross-file commit that reached only one member" {
     // The set accepts new cross-file commits after the repair.
     try crossCommit(conn, 3);
     try std.testing.expectEqual(@as(i64, 2), try count(conn, "select count(*) from m1.t"));
+}
+
+/// Copies the newest WAL frame for `page` in `wal_path` into the database
+/// file, as a checkpointer does page by page. Nothing else changes: the
+/// marker page stays, and the -shm and nBackfill are untouched.
+fn copyFrameToDatabase(db_path: []const u8, wal_path: []const u8, page: u32) !void {
+    const io = std.testing.io;
+    const wal = try std.Io.Dir.cwd().readFileAlloc(io, wal_path, std.testing.allocator, .limited(64 * 1024 * 1024));
+    defer std.testing.allocator.free(wal);
+    const page_size = std.mem.readInt(u32, wal[8..12], .big);
+    const frame_size = 24 + page_size;
+    var newest: ?usize = null;
+    var offset: usize = 32;
+    while (offset + frame_size <= wal.len) : (offset += frame_size) {
+        if (std.mem.readInt(u32, wal[offset..][0..4], .big) == page) newest = offset;
+    }
+    const at = newest orelse return error.TestPageNotInWal;
+    const db = try std.Io.Dir.cwd().readFileAlloc(io, db_path, std.testing.allocator, .limited(64 * 1024 * 1024));
+    defer std.testing.allocator.free(db);
+    const start = (page - 1) * page_size;
+    try std.testing.expect(db.len >= start + page_size);
+    @memcpy(db[start..][0..page_size], wal[at + 24 ..][0..page_size]);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = db_path, .data = db });
+}
+
+fn rootPage(conn: *cwal.Conn, comptime table: []const u8) !u32 {
+    return @intCast(try count(conn, "select rootpage from main.sqlite_schema where name = '" ++ table ++ "'"));
+}
+
+/// The crash image of R6's partial-checkpoint case: main holds a torn
+/// cross-file commit (transaction 2) in its WAL; s1 stops after transaction
+/// 1. With `checkpoint_first`, main's WAL was emptied after transaction 1,
+/// so no page of transaction 2 has an earlier copy in the WAL. Then an
+/// outside checkpointer copied transaction 2's page of `t` into main's
+/// database file and died before the marker page and before nBackfill.
+fn partialCheckpointImage(tmp: *std.testing.TmpDir, image: *Paths, checkpoint_first: bool) !void {
+    var paths: Paths = .{};
+    const main_path = try paths.add(&tmp.sub_path, "main.db");
+    const s1_path = try paths.add(&tmp.sub_path, "s1.db");
+    try createMember(main_path);
+    try createMember(s1_path);
+    const image_main = try image.add(&tmp.sub_path, "image-main.db");
+    const image_s1 = try image.add(&tmp.sub_path, "image-s1.db");
+    var buf: [2][300]u8 = undefined;
+    var t_root: u32 = 0;
+    {
+        const conn = try cwal.Conn.open(paths.slice(), writer);
+        defer conn.close();
+        try crossCommit(conn, 1);
+        t_root = try rootPage(conn, "t");
+        try std.testing.expect(t_root != try rootPage(conn, "cwal_marker"));
+        if (checkpoint_first) try conn.exec("pragma main.wal_checkpoint(TRUNCATE)");
+        try copyFile(s1_path, image_s1);
+        try copyFile(try std.fmt.bufPrint(&buf[0], "{s}-wal", .{s1_path}), try std.fmt.bufPrint(&buf[1], "{s}-wal", .{image_s1}));
+        try crossCommit(conn, 2);
+        try copyFile(main_path, image_main);
+        try copyFile(try std.fmt.bufPrint(&buf[0], "{s}-wal", .{main_path}), try std.fmt.bufPrint(&buf[1], "{s}-wal", .{image_main}));
+    }
+    try copyFrameToDatabase(image_main, try std.fmt.bufPrint(&buf[1], "{s}-wal", .{image_main}), t_root);
+}
+
+test "R6: a torn page checkpointed without an earlier WAL copy refuses recovery" {
+    registerOnce();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var image: Paths = .{};
+    try partialCheckpointImage(&tmp, &image, true);
+    // Transaction 1's version of the page is gone from both the database
+    // file and the WAL, so recovery cannot roll back main.
+    try expectOpenError(error.ProtocolViolation, image.slice(), writer);
+}
+
+test "R6: a torn page checkpointed over an earlier WAL copy is rolled back" {
+    registerOnce();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var image: Paths = .{};
+    try partialCheckpointImage(&tmp, &image, false);
+    // Transaction 1's copy of the page stays in the WAL and overrides the
+    // database file, so the rollback is complete.
+    cwal.last_recovery = "none";
+    const conn = try cwal.Conn.open(image.slice(), writer);
+    defer conn.close();
+    try std.testing.expectEqualStrings("rollback", cwal.last_recovery);
+    try std.testing.expectEqual(@as(i64, 1), try count(conn, "select count(*) from main.t"));
+    try std.testing.expectEqual(@as(i64, 1), try count(conn, "select count(*) from m1.t"));
+    try std.testing.expect(try integrityOk(conn));
 }
 
 test "plain mode commits across members without the protocol" {
