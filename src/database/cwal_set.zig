@@ -412,6 +412,17 @@ fn stopAfter(db: *sqlite.Database, step: Step) Error!void {
     return error.Interrupt;
 }
 
+/// Darwin's fsync neither flushes the drive's write cache nor orders writes
+/// (cwal.zig `full_fsync`). Enabling depends on every member's marker table
+/// reaching the disk before main's raw flag, so on Darwin the connection
+/// that enables commits and checkpoints with F_FULLFSYNC, as CWAL handles
+/// do.
+fn syncFully(db: *sqlite.Database) Error!void {
+    if (!builtin.os.tag.isDarwin()) return;
+    try db.exec("pragma fullfsync=1");
+    try db.exec("pragma checkpoint_fullfsync=1");
+}
+
 fn checkpointTruncate(db: *sqlite.Database, schema: [:0]const u8) Error!void {
     const result = try db.walCheckpoint(schema, .truncate);
     if (result.busy or result.log_frames != 0) return error.Busy;
@@ -456,6 +467,7 @@ pub fn enable(db: *sqlite.Database, schemas: []const [:0]const u8) Error!void {
         for (schemas) |schema| execPrint(db, "select count(*) from {s}.sqlite_schema", .{schema}) catch {};
     }
     for (schemas) |schema| try execPrint(db, "pragma {s}.synchronous=FULL", .{schema});
+    try syncFully(db);
 
     try db.exec("begin immediate");
     {
@@ -489,6 +501,7 @@ pub fn enable(db: *sqlite.Database, schemas: []const [:0]const u8) Error!void {
 /// table, so a plain checkpoint of main is safe.
 pub fn finishEnable(db: *sqlite.Database) Error!void {
     if (!available) return error.UnsupportedZovaVersion;
+    try syncFully(db);
     try checkpointTruncate(db, "main");
 }
 

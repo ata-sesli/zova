@@ -198,6 +198,28 @@ test "an enable stopped at each step leaves a state the next open completes or u
     }
 }
 
+test "enabling syncs with F_FULLFSYNC on Apple platforms" {
+    if (!cwal_set.available) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var paths: Paths = .{};
+    try paths.init(&tmp);
+    try createWalSet(&paths);
+
+    // Stopped after the marker commits: what the enabling connection has
+    // set is still on it. Plain fsync on Darwin neither flushes the drive
+    // cache nor orders writes, and the markers must reach the disk before
+    // main's raw flag.
+    var db = try Database.open(paths.main);
+    defer db.deinit();
+    const darwin: i64 = @intFromBool(@import("builtin").os.tag.isDarwin());
+    try std.testing.expectEqual(@as(i64, 0), try queryCount(&db, "pragma fullfsync"));
+    cwal_set.test_stop = .enable_markers;
+    try std.testing.expectError(error.Interrupt, db.setCommitProtocol(.cwal));
+    try std.testing.expectEqual(darwin, try queryCount(&db, "pragma fullfsync"));
+    try std.testing.expectEqual(darwin, try queryCount(&db, "pragma checkpoint_fullfsync"));
+}
+
 test "a disable stopped at each step leaves a state the next open completes or keeps" {
     if (!cwal_set.available) return error.SkipZigTest;
     inline for (.{ .disable_checkpoints, .disable_flag_commit, .disable_flag_checkpoint, .disable_markers }) |step| {
@@ -582,7 +604,6 @@ test "a refused cross-file commit returns Misuse through exec and through a stat
         try std.testing.expect(!try expectWhole(&db, 1));
     }
 }
-
 
 fn expectIntegrity(db: *Database) !void {
     for ([_][:0]const u8{ "pragma main.integrity_check", "pragma vector_store.integrity_check" }) |sql| {
