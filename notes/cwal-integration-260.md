@@ -484,6 +484,41 @@ Each phase lands with its tests. Nothing ships outside
      its own name, never as the default; fault and delay hooks only in
      test builds.
    - The prototype's unit-level behavior tests come with it.
+
+**Status (2026-11-27).**
+
+- Phase 1 landed in `29c11bc`. Verified: `zig build test` passes,
+  `scripts/check-generated-c.sh` passes, the Rust and Python native
+  source sync and checks pass, `cargo nextest -p zova-sys` passes 18/18,
+  and the Go capability test passes. The JavaScript and Python suites were
+  not run. Follow-up fix, uncommitted: `tests/sqlite_capabilities.c` checks
+  `ENABLE_SNAPSHOT`. The check lives in the native test, not the shared
+  header, because the browser build has no snapshot interface.
+- Phase 2 is ported but not committed:
+  - `src/cwal/cwal.zig` takes SQLite from the shared `sqlite_c` module and
+    POSIX calls from `src/cwal/sys.h`. Nothing in the Zova module imports
+    it yet.
+  - Fault, mutation, delay and debug hooks compile in only when the build
+    sets `cwal_options.test_hooks`. Production code ignores `CWAL_*`
+    environment variables.
+  - `Conn.open` now frees the member paths and the handle on failure, and
+    `Conn.close` frees them too. The prototype leaked both.
+  - `zig build test-cwal -Dexperimental-cwal` runs 8 behavior tests twice,
+    once without hooks and once with them:
+    - registration leaves the default VFS unchanged;
+    - a cross-file commit and its markers;
+    - member ownership (`MemberOwned`) and same-set sharing;
+    - a duplicate member is refused;
+    - recovery rolls back a commit that reached only one member;
+    - plain mode commits across members without the protocol;
+    - hooks are absent from the production variant.
+  - With hooks compiled in, `no-markers` and `no-ownership` are each
+    detected. `no-root-check` and `no-repair-lock` are not; those need the
+    concurrent outsider cases from the torture suite (phase 7).
+  - Without the flag, the build graph has no CWAL step.
+- Open decision: the prototype built SQLite with `SQLITE_MAX_ATTACHED=31`
+  so that a set could hold 32 files. Zova's build keeps SQLite's default
+  of 10, so a set is capped at 11 files.
 3. **Open path.**
    - Header-flag detection, member list from main, ownership checks and
      recovery ordering (§3, §7, §8).

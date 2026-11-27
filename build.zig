@@ -869,6 +869,27 @@ pub fn build(b: *std.Build) void {
         c_api_test_step,
     }) |suite_step| test_step.dependOn(suite_step);
 
+    // Experimental CWAL (POSIX only). Not reachable from the Zova module yet;
+    // its tests run once without and once with the test hooks compiled in.
+    if (experimental_cwal) {
+        const cwal_sys = b.addTranslateC(.{
+            .root_source_file = b.path("src/cwal/sys.h"),
+            .target = target,
+            .optimize = optimize,
+        }).createModule();
+        const cwal_test_step = b.step("test-cwal", "Run experimental CWAL tests (with -Dexperimental-cwal)");
+        for ([_]bool{ false, true }) |test_hooks| {
+            const cwal_options = b.addOptions();
+            cwal_options.addOption(bool, "test_hooks", test_hooks);
+            const module = createZigTestModule(b, "src/test_cwal_root.zig", target, optimize, zova_build_options, plugin_fixture_options, sqlite_lib);
+            module.addImport("cwal_sys", cwal_sys);
+            module.addOptions("cwal_options", cwal_options);
+            const cwal_tests = b.addTest(.{ .name = if (test_hooks) "test-cwal-hooks" else "test-cwal", .root_module = module });
+            cwal_test_step.dependOn(&b.addRunArtifact(cwal_tests).step);
+        }
+        test_step.dependOn(cwal_test_step);
+    }
+
     const e2e_module = b.createModule(.{
         .root_source_file = b.path("tests/e2e.zig"),
         .target = target,
