@@ -30,7 +30,7 @@ fn bufPrintZ(buf: []u8, comptime fmt: []const u8, args: anytype) std.fmt.BufPrin
     return std.fmt.bufPrintSentinel(buf, fmt, args, 0);
 }
 
-pub const max_members = 32;
+pub const max_members = 31;
 const shm_region_size = 32768;
 
 // SQLite WAL constants (sqlite3.c: WAL_WRITE_LOCK, WAL_CKPT_LOCK, WAL_HDRSIZE,
@@ -1295,6 +1295,9 @@ pub const Conn = struct {
     /// as `m1`, `m2`, ... In CWAL mode the first handle to open a set that no
     /// other handle has open runs recovery.
     pub fn open(paths: []const []const u8, options: Options) Error!*Conn {
+        // One connection attaches every member but main, within SQLite's
+        // SQLITE_MAX_ATTACHED (30 in Zova's native builds).
+        if (paths.len == 0 or paths.len > max_members) return error.ProtocolViolation;
         const conn = allocator.create(Conn) catch return error.Io;
         conn.* = .{ .id = 0, .mode = options.mode, .role = options.role, .nmembers = @intCast(paths.len) };
         for (paths, 0..) |p, i| conn.paths[i] = fullPath(p) catch {

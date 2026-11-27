@@ -118,9 +118,10 @@ files on purpose.
 
 1. The CWAL set is exactly main plus the stores recorded in main's
    `_zova_bound_stores` at open, in a fixed order: main, object, vector,
-   graph. Members that are not bound are absent. Sets have at most four
-   members, so the prototype's 32-member limit and `SQLITE_MAX_ATTACHED=31`
-   are not needed (SQLite's default of 10 is enough).
+   graph. Members that are not bound are absent. Today a set has at most
+   four members. Native builds use `SQLITE_MAX_ATTACHED=30` (decision 8),
+   so a set can grow to 31 members if more bound stores are added later;
+   `max_members` in `src/cwal/cwal.zig` is 31 to match.
 2. Recovery checks ownership **before** it truncates anything. Each store's
    `bound_set_id` and `store_id`, read through the recovery connection,
    must match main's row. A mismatch refuses the open (`ProtocolViolation`),
@@ -491,10 +492,10 @@ Each phase lands with its tests. Nothing ships outside
   `scripts/check-generated-c.sh` passes, the Rust and Python native
   source sync and checks pass, `cargo nextest -p zova-sys` passes 18/18,
   and the Go capability test passes. The JavaScript and Python suites were
-  not run. Follow-up fix, uncommitted: `tests/sqlite_capabilities.c` checks
+  not run. Follow-up fix in `25fdca9`: `tests/sqlite_capabilities.c` checks
   `ENABLE_SNAPSHOT`. The check lives in the native test, not the shared
   header, because the browser build has no snapshot interface.
-- Phase 2 is ported but not committed:
+- Phase 2 landed in `8320b3e`:
   - `src/cwal/cwal.zig` takes SQLite from the shared `sqlite_c` module and
     POSIX calls from `src/cwal/sys.h`. Nothing in the Zova module imports
     it yet.
@@ -516,9 +517,23 @@ Each phase lands with its tests. Nothing ships outside
     detected. `no-root-check` and `no-repair-lock` are not; those need the
     concurrent outsider cases from the torture suite (phase 7).
   - Without the flag, the build graph has no CWAL step.
-- Open decision: the prototype built SQLite with `SQLITE_MAX_ATTACHED=31`
-  so that a set could hold 32 files. Zova's build keeps SQLite's default
-  of 10, so a set is capped at 11 files.
+- Attach limit (decision 8): every native build defines
+  `SQLITE_MAX_ATTACHED=30`, and the native capability tests require
+  `MAX_ATTACHED=30`. WASM keeps SQLite's default of 10. `max_members` is
+  now 31, and `Conn.open` refuses an empty set or one larger than
+  `max_members` with `ProtocolViolation`; before, more than 32 paths
+  wrote past the member arrays (with the check removed, the new tests
+  panic with `index out of bounds: index 31, len 31`).
+- Boundary tests (12 per variant, both variants pass in Debug,
+  ReleaseSafe and ReleaseFast):
+  - SQLite's attach limit equals `max_members - 1`; a plain connection
+    attaches 30 databases and the 31st fails with `SQLITE_ERROR`
+    ("too many attached databases - max 30");
+  - 0, 32 and 124 paths are refused with `ProtocolViolation`;
+  - a 31-member set commits across every member (marker mask
+    `0x7fffffff`) and reopens without recovery;
+  - opening 32 real members is refused before anything is locked, and
+    the first 31 of them then open normally.
 3. **Open path.**
    - Header-flag detection, member list from main, ownership checks and
      recovery ordering (§3, §7, §8).
@@ -558,6 +573,19 @@ Each phase lands with its tests. Nothing ships outside
    artifacts of every run are kept. Integration continues while T1, T4,
    T6 and T7 stay tracked. Windows (T5) stays deferred. Production release
    is not authorized.
+8. **Attach limit** (2026-11-27). Native builds define
+   `SQLITE_MAX_ATTACHED=30`, so a set can hold up to 31 files. 30 is the
+   largest value that keeps SQLite's attached-database mask a single
+   32-bit word, it fits the 32-bit member mask in the markers, and the
+   prototype tested sets up to 32 files. WASM builds keep the default.
+   Going past 31 files would need a wider marker mask (a storage change)
+   and new qualification.
+   The integrated implementation supports at most 31 members. The
+   prototype's results at 32 files (README and the raw results under
+   `prototypes/cwal/results/`) remain valid evidence for its own build
+   (`SQLITE_MAX_ATTACHED=31`, `max_members = 32`, §1) and are not rerun
+   or rewritten; phase 7 qualifies the integrated build at its own
+   limit of 31.
 
 Scope now: T2 and T3 only, closed with implementation and test evidence in
 the prototype before the broader integration starts. T1, T4 and T5 stay

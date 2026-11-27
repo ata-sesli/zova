@@ -55,6 +55,7 @@ clang -std=c99 \
     -DSQLITE_ENABLE_CARRAY \
     -DSQLITE_ENABLE_MATH_FUNCTIONS \
     -DSQLITE_ENABLE_SNAPSHOT \
+    -DSQLITE_MAX_ATTACHED=30 \
     -I "$BUNDLE" \
     -c "$BUNDLE/sqlite3.c" \
     -o "$TMP/sqlite3.o"

@@ -18,6 +18,9 @@ const sqlite_production_c_flags = &.{
     // sqlite3_snapshot_* for the experimental cross-file commit protocol.
     // Adds API only; set on every native build so generated C does not fork.
     "-DSQLITE_ENABLE_SNAPSHOT",
+    // Up to 30 attached stores, so a set can hold 31 files. 30 is the largest
+    // value that keeps SQLite's attached-database mask a single 32-bit word.
+    "-DSQLITE_MAX_ATTACHED=30",
 };
 
 pub fn build(b: *std.Build) void {

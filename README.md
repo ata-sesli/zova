@@ -40,7 +40,9 @@ SQLite's C interface; enabling it does not add a high-level Zova array API.
 for databases opened through an unrelated system SQLite build.
 Native builds also enable SQLite's snapshot interface
 (`SQLITE_ENABLE_SNAPSHOT`), for an experimental commit protocol that is off
-by default; it adds no Zova API and is not enabled in WASM builds.
+by default; it adds no Zova API and is not enabled in WASM builds. Native
+builds allow 30 attached databases per connection (`SQLITE_MAX_ATTACHED=30`,
+SQLite's default is 10); WASM builds keep the default.
 
 Zova also runs in browsers through `zova-wasm`, with worker-owned memory
 databases and named OPFS persistence. It follows the native `zova-js` API,

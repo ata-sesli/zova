@@ -14,8 +14,8 @@ fn registerOnce() void {
 }
 
 const Paths = struct {
-    buf: [4][256]u8 = undefined,
-    list: [4][]const u8 = undefined,
+    buf: [cwal.max_members + 1][256]u8 = undefined,
+    list: [cwal.max_members + 1][]const u8 = undefined,
     len: usize = 0,
 
     fn add(paths: *Paths, sub_path: []const u8, name: []const u8) ![:0]const u8 {
@@ -72,6 +72,71 @@ fn expectOpenError(expected: anyerror, paths: []const []const u8, options: cwal.
         unexpected.close();
         return error.TestUnexpectedOpen;
     } else |err| try std.testing.expectEqual(expected, err);
+}
+
+test "max_members matches the SQLite attach limit" {
+    var db: ?*c.sqlite3 = null;
+    defer _ = c.sqlite3_close(db);
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(":memory:", &db));
+    try std.testing.expectEqual(@as(c_int, cwal.max_members - 1), c.sqlite3_limit(db, c.SQLITE_LIMIT_ATTACHED, -1));
+}
+
+test "a connection attaches exactly max_members - 1 databases" {
+    var db: ?*c.sqlite3 = null;
+    defer _ = c.sqlite3_close(db);
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(":memory:", &db));
+    var buf: [64]u8 = undefined;
+    for (1..cwal.max_members) |i| {
+        const sql = try std.fmt.bufPrintSentinel(&buf, "attach ':memory:' as a{d}", .{i}, 0);
+        try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_exec(db, sql.ptr, null, null, null));
+    }
+    try std.testing.expectEqual(c.SQLITE_ERROR, c.sqlite3_exec(db, "attach ':memory:' as one_too_many", null, null, null));
+    try std.testing.expectEqualStrings("too many attached databases - max 30", std.mem.span(c.sqlite3_errmsg(db)));
+}
+
+test "a set with no members or more than max_members is refused" {
+    registerOnce();
+    const none: []const []const u8 = &.{};
+    try expectOpenError(error.ProtocolViolation, none, writer);
+    const many: [cwal.max_members + 1][]const u8 = @splat("unused.db");
+    try expectOpenError(error.ProtocolViolation, &many, writer);
+    const far_too_many: [4 * cwal.max_members][]const u8 = @splat("unused.db");
+    try expectOpenError(error.ProtocolViolation, &far_too_many, reader);
+}
+
+test "a set of max_members commits across every member; one more is refused" {
+    registerOnce();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var paths: Paths = .{};
+    var name: [16]u8 = undefined;
+    for (0..cwal.max_members + 1) |i| {
+        try createMember(try paths.add(&tmp.sub_path, try std.fmt.bufPrint(&name, "m{d}.db", .{i})));
+    }
+    const all = paths.slice();
+    const set = all[0..cwal.max_members];
+
+    // One member too many is refused before anything is opened or locked.
+    try expectOpenError(error.ProtocolViolation, all, writer);
+
+    const conn = try cwal.Conn.open(set, writer);
+    var sql: [96]u8 = undefined;
+    try conn.exec("begin");
+    for (0..cwal.max_members) |i| {
+        const schema = if (i == 0) "main" else try std.fmt.bufPrint(&name, "m{d}", .{i});
+        try conn.exec(try std.fmt.bufPrintSentinel(&sql, "insert into {s}.t values (1, 'x')", .{schema}, 0));
+    }
+    try conn.commit();
+    const full_mask: i64 = (1 << cwal.max_members) - 1;
+    try std.testing.expectEqual(full_mask, try count(conn, "select mask from main.cwal_marker where k = 0"));
+    try std.testing.expectEqual(full_mask, try count(conn, "select mask from m30.cwal_marker where k = 0"));
+    conn.close();
+
+    cwal.last_recovery = "none";
+    const again = try cwal.Conn.open(set, reader);
+    defer again.close();
+    try std.testing.expectEqualStrings("none", cwal.last_recovery);
+    try std.testing.expectEqual(@as(i64, 1), try count(again, "select count(*) from m30.t"));
 }
 
 test "register adds the cwal VFS without changing the default" {

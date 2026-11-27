@@ -40,6 +40,7 @@ fn packaged_sqlite_modules_and_native_carray() {
             "ENABLE_FTS5",
             "ENABLE_DBSTAT_VTAB",
             "ENABLE_SNAPSHOT",
+            "MAX_ATTACHED=30",
         ] {
             assert_eq!(
                 sqlite3_compileoption_used(CString::new(option).unwrap().as_ptr()),

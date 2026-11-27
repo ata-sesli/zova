@@ -8,7 +8,8 @@ INSERT INTO capability_check VALUES
  (sqlite_compileoption_used('ENABLE_MATH_FUNCTIONS')),
  (sqlite_compileoption_used('ENABLE_FTS5')),
  (sqlite_compileoption_used('ENABLE_DBSTAT_VTAB')),
- (sqlite_compileoption_used('ENABLE_SNAPSHOT'));
+ (sqlite_compileoption_used('ENABLE_SNAPSHOT')),
+ (sqlite_compileoption_used('MAX_ATTACHED=30'));
 CREATE VIRTUAL TABLE temp.capability_boxes USING rtree(id,x0,x1,y0,y1);
 INSERT INTO capability_boxes VALUES(1,0,10,0,10);
 CREATE VIRTUAL TABLE temp.capability_zones USING geopoly;
