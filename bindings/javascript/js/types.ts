@@ -111,6 +111,9 @@ export type JournalModeName = "delete" | "truncate" | "persist" | "memory" | "wa
 /** SQLite WAL checkpoint mode for `checkpoint`. */
 export type CheckpointModeName = "passive" | "full" | "restart" | "truncate";
 
+/** Commit protocol of a database set, for `setCommitProtocol`. */
+export type CommitProtocolName = "none" | "cwal";
+
 /** Journal mode of one member of a database set. */
 export interface JournalModeMember {
   readonly member: ProgressMember;

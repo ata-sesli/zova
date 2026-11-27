@@ -79,4 +79,50 @@ describe("journal mode and checkpoint", () => {
       await db.close();
     }
   });
+
+  // Runs against any native library: one built without -Dexperimental-cwal
+  // refuses both protocols, and a CWAL build switches a WAL set and back.
+  test("set the commit protocol, or report an unsupported library", () => {
+    const file = path("protocol.zova");
+    const db = Database.create(file);
+    try {
+      expectCode(() => db.setCommitProtocol("bogus" as never), "ZOVA_INVALID_ARGUMENT");
+      let code = "";
+      try {
+        db.setCommitProtocol("cwal");
+      } catch (error) {
+        expect(error).toBeInstanceOf(ZovaError);
+        code = (error as ZovaError).code;
+      }
+      if (code === "ZOVA_UNSUPPORTED_ZOVA_VERSION") {
+        expectCode(() => db.setCommitProtocol("none"), "ZOVA_UNSUPPORTED_ZOVA_VERSION");
+        return;
+      }
+      // CWAL needs every member in WAL mode.
+      expect(code).toBe("ZOVA_MISUSE");
+      db.setJournalMode("wal");
+      db.exec("create table rows(x)");
+      db.setCommitProtocol("cwal");
+      expectCode(() => Database.open(file), "ZOVA_BUSY");
+      db.setCommitProtocol("none");
+    } finally {
+      db.close();
+    }
+  });
+
+  test("set the commit protocol on AsyncDatabase", async () => {
+    const db = AsyncDatabase.create(path("async-protocol.zova"));
+    try {
+      await expect(db.setCommitProtocol("bogus" as never)).rejects.toBeInstanceOf(ZovaError);
+      await db.setJournalMode("wal");
+      const outcome = await db.setCommitProtocol("cwal").then(
+        () => "ok",
+        (error: ZovaError) => error.code,
+      );
+      expect(["ok", "ZOVA_UNSUPPORTED_ZOVA_VERSION"]).toContain(outcome);
+      if (outcome === "ok") await db.setCommitProtocol("none");
+    } finally {
+      await db.close();
+    }
+  });
 });

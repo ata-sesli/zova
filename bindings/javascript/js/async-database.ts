@@ -10,6 +10,7 @@ import type {
 import type {
   CheckpointedMember,
   CheckpointModeName,
+  CommitProtocolName,
   ExtensionOptions,
   FormatInfo,
   JournalModeMember,
@@ -184,6 +185,11 @@ export class AsyncDatabase {
     return this.#enqueue(async () =>
       (await this.#native.asyncJournalModes()).map(journalModeMember),
     );
+  }
+
+  /** `Database.setCommitProtocol` on the worker thread pool. */
+  setCommitProtocol(protocol: CommitProtocolName): Promise<void> {
+    return this.#enqueue(() => this.#native.asyncSetCommitProtocol(protocol));
   }
 
   /** `Database.checkpoint` on the worker thread pool. */

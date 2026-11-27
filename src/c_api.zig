@@ -136,6 +136,9 @@ pub const zova_database_journal_modes_request = internal.zova_database_journal_m
 pub const zova_checkpointed_member = internal.zova_checkpointed_member;
 pub const zova_checkpoint_result = internal.zova_checkpoint_result;
 pub const zova_database_checkpoint_request = internal.zova_database_checkpoint_request;
+pub const ZOVA_COMMIT_PROTOCOL_NONE = internal.ZOVA_COMMIT_PROTOCOL_NONE;
+pub const ZOVA_COMMIT_PROTOCOL_CWAL = internal.ZOVA_COMMIT_PROTOCOL_CWAL;
+pub const zova_database_set_commit_protocol_request = internal.zova_database_set_commit_protocol_request;
 pub const zova_database_restore_request = internal.zova_database_restore_request;
 pub const zova_database_exec_request = internal.zova_database_exec_request;
 pub const zova_sql_function_register_request = internal.zova_sql_function_register_request;
@@ -545,6 +548,10 @@ pub fn zova_database_journal_modes(request: ?*const zova_database_journal_modes_
 
 pub fn zova_database_checkpoint(request: ?*const zova_database_checkpoint_request) callconv(.c) zova_status {
     return internal.zova_database_checkpoint(request);
+}
+
+pub fn zova_database_set_commit_protocol(request: ?*const zova_database_set_commit_protocol_request) callconv(.c) zova_status {
+    return internal.zova_database_set_commit_protocol(request);
 }
 
 pub fn zova_database_set_busy_timeout(request: ?*const zova_database_busy_timeout_request) callconv(.c) zova_status {
@@ -1295,6 +1302,7 @@ comptime {
             "zova_database_set_journal_mode",
             "zova_database_journal_modes",
             "zova_database_checkpoint",
+            "zova_database_set_commit_protocol",
             "zova_database_backup_with_progress",
             "zova_database_compact_with_progress",
             "zova_database_restore_to_memory",

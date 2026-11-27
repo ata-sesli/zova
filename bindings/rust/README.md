@@ -367,6 +367,18 @@ for member in db.checkpoint(CheckpointMode::Truncate)? {
 }
 ```
 
+Experimental: `set_commit_protocol(CommitProtocol::Cwal)` switches the set to
+the cross-file commit protocol (CWAL), so a transaction that writes several
+members commits atomically across them, and `CommitProtocol::None` switches
+back. `SharedDatabase` has the same call. It reopens the handle, and only
+libraries built with `-Dexperimental-cwal` support it; others fail with
+`ZOVA_UNSUPPORTED_ZOVA_VERSION`. Every member must be in WAL mode, and the
+handle must be the only one on the set, outside a transaction, with no open
+child handles or registered SQL functions; register SQL functions after
+switching. A CWAL set allows one read-write handle and any number of read-only
+ones. Do not open its member files with another SQLite library in the same
+process. See `docs/concurrency.md`.
+
 Diagnostic recovery commands such as `zova doctor`, `zova salvage --dry-run`,
 and `zova salvage <source> <destination>` are CLI-first. In v0.25, CLI salvage
 copies valid core data and uses extension salvage hooks for extension-owned

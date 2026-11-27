@@ -2,7 +2,8 @@
 //!
 //! This Rust binding currently covers database lifecycle, records through
 //! prepared SQL statements, transactions, explicit vacuum, free-page reclaim,
-//! set-wide journal mode and WAL checkpoints,
+//! set-wide journal mode and WAL checkpoints, the experimental cross-file
+//! commit protocol,
 //! backup/compact/restore, objects, chunks, manifests, range reads, assembly, `ObjectWriter`,
 //! vector collections, vector CRUD, exact vector search, and SQL-native vector
 //! queries through prepared statements, graphs, graph traversal, opaque-key
@@ -51,7 +52,9 @@ pub use graph_keyed::{
     GraphKeyedNode, GraphScanCursor, GraphScanOptions, GraphScanPage, GraphWalkDirectionOptions,
     GraphWalkProfile,
 };
-pub use journal::{CheckpointMode, CheckpointedMember, JournalMode, JournalModeMember};
+pub use journal::{
+    CheckpointMode, CheckpointedMember, CommitProtocol, JournalMode, JournalModeMember,
+};
 pub use kv::{KvEntry, KvScanEntry, KvScanOptions, KvScanPage};
 pub use notification::{Notification, Subscription};
 pub use object::{

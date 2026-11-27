@@ -91,7 +91,7 @@ area must report on it.
 
 | Id | Item | State | Closing evidence |
 |---|---|---|---|
-| T1 (R5) | Native ARM64 validation. The checkpoint counter relies on two `xShmBarrier` calls; qemu runs used x86 ordering. | Deferred | Torture `readers`, `ckptrace`, `ckptreset`, `closeckpt`, `nreaders` and the crash sections pass natively on ARM64 Linux (`ubuntu-24.04-arm` is already a CI runner) and on Apple Silicon macOS, plus a mutation run of `no-ckpt-validate` detected there. |
+| T1 (R5) | Native ARM64 validation. The checkpoint counter relies on two `xShmBarrier` calls; qemu runs used x86 ordering. | Open. Early evidence on Apple Silicon (2026-11-27, prototype at `0f418a0`, Apple M1, APFS): the ten torture sections pass as Debug, ReleaseSafe and ReleaseFast builds; `ckptrace` run 20 times per build mode shows 0 violations in 4,273 checkpoint races; `no-ckpt-validate` is detected in every mode. Raw results: `prototypes/cwal/results/2026-11-27-macos-arm64-0f418a0/`, `prototypes/cwal/results/2026-11-27-macos-arm64-release-0f418a0/`. Native ARM64 Linux is not run yet, and neither platform has run the integrated build (phase 7). | Torture `readers`, `ckptrace`, `ckptreset`, `closeckpt`, `nreaders` and the crash sections pass natively on ARM64 Linux (`ubuntu-24.04-arm` is already a CI runner) and on Apple Silicon macOS, plus a mutation run of `no-ckpt-validate` detected there. |
 | T2 (R3) | R3 timing case: a foreign checkpoint of a torn commit, combined with the last other handle closing during this handle's open. On the shared path the heads were read only when no other handle of the process was registered, so a handle of another set in the same process left this undetected. | Closed in the prototype (2026-11-26) | Torture section `delaypoints`: a pause point (`CWAL_PAUSE_AT=open-shared`) and two crash probes (`commit-sync-first`, `commit-sync-next`) make R3, `no-late-alone` and `no-cross-flag` deterministic. The shared path now skips the heads only when another handle of the same set is open in the process; member ownership (T3) makes that safe. `no-cross-flag`, `no-late-alone`, `no-early-heads` and `heads-process-wide` are each detected. R3 needs a lost seqlock page to be reachable (REVIEW.md R3). Raw results: `prototypes/cwal/results/2026-11-26-t2t3-3498a53/`. |
 | T3 (R4) | Member ownership was decided per main file. | Closed in the prototype (2026-11-26) | Per-member `flock` ownership with a recorded set identity (§3). Torture section `ownership`: cross-process and same-process refusals (`MemberOwned`), same-set sharing, release on kill, and a two-set open/close race with no overlapping intervals; `no-ownership` is detected. Same raw results directory. |
 | T4 | Endurance: 12–24 h sustained workloads (deferred from section 7). | Deferred | Run against the integrated implementation, not the prototype. |
@@ -896,6 +896,56 @@ diagnostics and salvage rows are not done (below).
     migrated until the next format.
 6. **C ABI and bindings.** §10, with ABI and format decisions approved
    first.
+
+**Phase 6 status (2026-11-27).** The C ABI call and the native bindings are
+done (decisions 3, 6 and 9). Package and ABI versions are unchanged
+(additive symbol and statuses).
+
+- C ABI (`include/zova.h`, `src/c_api/`):
+  - Statuses `ZOVA_COMMIT_SET_BROKEN = 39`, `ZOVA_COMMIT_SET_NEEDS_REPAIR =
+    40` and `ZOVA_MEMBER_OWNED = 41`, in the database-level range after
+    `ZOVA_NO_MIGRATION_PATH`. The three Zig errors map to them; before,
+    they fell through to `ZOVA_SQLITE_ERROR`. An unopenable CWAL set keeps
+    `ZOVA_UNSUPPORTED_ZOVA_VERSION` (decision 9).
+  - `zova_database_set_commit_protocol(request)` with
+    `ZOVA_COMMIT_PROTOCOL_NONE = 0` / `CWAL = 1`; another value is
+    `ZOVA_INVALID_ARGUMENT`. It calls `Database.setCommitProtocol`, which
+    in a build without `-Dexperimental-cwal` returns
+    `UnsupportedZovaVersion` for either value (kept: the build has no
+    protocol to switch; the header documents it).
+  - The C layer adds one guard: when the protocol changes, live child
+    handles (statements, object writers and readers, subscriptions, a
+    fresh build) or registered SQL functions on the handle refuse with
+    `ZOVA_MISUSE`. The reopen would free the function contexts while the
+    handle still lists them, so they could not be registered again.
+  - Tests: `src/c_api_internal_tests.zig` (status values, names and
+    mapping; request validation; in CWAL builds every refusal, the switch,
+    a second writer `BUSY`, a reader `READ_ONLY`, and the switch back with
+    rows kept). Disabling the guards makes the CWAL test fail. The header,
+    symbol and C smoke tests cover the new names, layout (16 bytes,
+    `protocol` at offset 8) and the call. WASM does not export it
+    (allow-listed in `scripts/abi-coverage-allowlist.json`).
+- Bindings, each with a test that takes the CWAL branch on a CWAL library
+  and the unsupported branch otherwise:
+  - Rust: `Status::{CommitSetBroken, CommitSetNeedsRepair, MemberOwned}`,
+    `CommitProtocol` (`#[non_exhaustive]`), `Database::set_commit_protocol`
+    and `SharedDatabase::set_commit_protocol`.
+  - Python: `Database.set_commit_protocol("none" | "cwal")`.
+  - JavaScript: `setCommitProtocol` on `Database` and `AsyncDatabase`,
+    type `CommitProtocolName`.
+  - Go: `StatusCommitSetBroken`, `StatusCommitSetNeedsRepair`,
+    `StatusMemberOwned`, `CommitProtocol` and `DB.SetCommitProtocol`.
+  - Python and JavaScript take status names from the Rust crate, so the
+    new statuses need no table of their own there.
+- Docs: binding READMEs, the WASM parity table, `API_STABILITY.md`
+  (experimental, outside the stable contract) and `docs/concurrency.md`
+  (switching rules, one writer, and the warning not to open member files
+  with another SQLite library in the same process).
+- Verification: `zig build test` with and without `-Dexperimental-cwal`,
+  `test-c-api`, `c-abi-test`, and `check-abi-coverage.py`. Rust and Go ran
+  against both the default library and a `-Dexperimental-cwal` C library;
+  Python and JavaScript ran only against the default library, so their
+  CWAL branch is not exercised.
 7. **Qualification.**
    - Port `torture.py` to drive Zova's CLI or a Zig test driver, keeping
      the plain-WAL baseline oracle.

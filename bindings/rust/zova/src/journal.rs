@@ -1,4 +1,5 @@
-//! Journal mode and WAL checkpoint calls over a whole database set.
+//! Journal mode, WAL checkpoint and commit protocol calls over a whole
+//! database set.
 
 use crate::progress::ProgressMember;
 
@@ -77,6 +78,37 @@ impl CheckpointMode {
             Self::Full => zova_sys::ZOVA_CHECKPOINT_FULL,
             Self::Restart => zova_sys::ZOVA_CHECKPOINT_RESTART,
             Self::Truncate => zova_sys::ZOVA_CHECKPOINT_TRUNCATE,
+        }
+    }
+}
+
+/// Commit protocol of a database set, for
+/// [`crate::Database::set_commit_protocol`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub enum CommitProtocol {
+    /// Each member commits on its own; a transaction that writes several
+    /// members is not atomic across them after a crash.
+    #[default]
+    None,
+    /// Experimental cross-file commit protocol (CWAL). Needs a native library
+    /// built with `-Dexperimental-cwal`.
+    Cwal,
+}
+
+impl CommitProtocol {
+    /// Stable machine-readable name shared by every Zova binding.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Cwal => "cwal",
+        }
+    }
+
+    pub(crate) fn code(self) -> u32 {
+        match self {
+            Self::None => zova_sys::ZOVA_COMMIT_PROTOCOL_NONE,
+            Self::Cwal => zova_sys::ZOVA_COMMIT_PROTOCOL_CWAL,
         }
     }
 }

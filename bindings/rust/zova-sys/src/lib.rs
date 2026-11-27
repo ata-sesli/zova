@@ -42,6 +42,9 @@ pub const ZOVA_MIGRATION_REQUIRED: zova_status = 35;
 pub const ZOVA_UNSUPPORTED_FUTURE_FORMAT: zova_status = 36;
 pub const ZOVA_UNSUPPORTED_LEGACY_FORMAT: zova_status = 37;
 pub const ZOVA_NO_MIGRATION_PATH: zova_status = 38;
+pub const ZOVA_COMMIT_SET_BROKEN: zova_status = 39;
+pub const ZOVA_COMMIT_SET_NEEDS_REPAIR: zova_status = 40;
+pub const ZOVA_MEMBER_OWNED: zova_status = 41;
 pub const ZOVA_OBJECT_NOT_FOUND: zova_status = 50;
 pub const ZOVA_OBJECT_ALREADY_EXISTS: zova_status = 51;
 pub const ZOVA_OBJECT_CHUNK_NOT_FOUND: zova_status = 52;
@@ -161,6 +164,9 @@ pub const ZOVA_CHECKPOINT_RESTART: u32 = 2;
 pub const ZOVA_CHECKPOINT_TRUNCATE: u32 = 3;
 
 pub const ZOVA_JOURNAL_MAX_MEMBERS: usize = 4;
+
+pub const ZOVA_COMMIT_PROTOCOL_NONE: u32 = 0;
+pub const ZOVA_COMMIT_PROTOCOL_CWAL: u32 = 1;
 
 pub const ZOVA_FORMAT_CURRENT: c_int = 0;
 pub const ZOVA_FORMAT_MIGRATABLE: c_int = 1;
@@ -1007,6 +1013,12 @@ pub struct zova_database_checkpoint_request {
     pub db: *mut zova_database,
     pub mode: u32,
     pub out_result: *mut zova_checkpoint_result,
+}
+
+#[repr(C)]
+pub struct zova_database_set_commit_protocol_request {
+    pub db: *mut zova_database,
+    pub protocol: u32,
 }
 
 #[repr(C)]
@@ -2151,6 +2163,9 @@ extern "C" {
     ) -> zova_status;
     pub fn zova_database_checkpoint(
         request: *const zova_database_checkpoint_request,
+    ) -> zova_status;
+    pub fn zova_database_set_commit_protocol(
+        request: *const zova_database_set_commit_protocol_request,
     ) -> zova_status;
     pub fn zova_database_set_busy_timeout(
         request: *const zova_database_busy_timeout_request,

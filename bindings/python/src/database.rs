@@ -377,6 +377,39 @@ impl PyDatabase {
             .collect())
     }
 
+    /// Experimental: switch this database set (the main database and each
+    /// attached bound store) to `protocol` ("none" or "cwal"), then open it
+    /// again through this handle. A set already in `protocol` is left as it
+    /// is.
+    ///
+    /// Only native libraries built with `-Dexperimental-cwal` support it;
+    /// others raise `ZovaError` with `ZOVA_UNSUPPORTED_ZOVA_VERSION`. It needs
+    /// a read-write handle on a file with every member in WAL mode, outside a
+    /// transaction (`ZOVA_OBJECT_TRANSACTION_ACTIVE`), with no other handle on
+    /// the set (`ZOVA_BUSY`), and with no open statements, object readers or
+    /// writers, subscriptions, or registered SQL functions on this handle
+    /// (`ZOVA_MISUSE`): register SQL functions after switching.
+    ///
+    /// A CWAL set has one writer: a second read-write open raises
+    /// `ZOVA_BUSY`, and read-only opens are unlimited. Do not open its member
+    /// files with Python's `sqlite3` or another SQLite library in this
+    /// process: closing that connection releases this process's POSIX locks
+    /// on the file.
+    pub(crate) fn set_commit_protocol(&mut self, protocol: &str) -> PyResult<()> {
+        let protocol = match protocol {
+            "none" => zova_rust::CommitProtocol::None,
+            "cwal" => zova_rust::CommitProtocol::Cwal,
+            _ => {
+                return Err(PyValueError::new_err(
+                    "commit protocol must be 'none' or 'cwal'",
+                ))
+            }
+        };
+        self.db_mut()?
+            .set_commit_protocol(protocol)
+            .map_err(zova_error)
+    }
+
     pub(crate) fn set_busy_timeout(&mut self, milliseconds: u32) -> PyResult<()> {
         self.db_mut()?
             .set_busy_timeout(milliseconds)

@@ -1,7 +1,7 @@
 use crate::error::{Error, Result};
 use crate::journal::{
-    checkpointed_members, journal_mode_members, CheckpointMode, CheckpointedMember, JournalMode,
-    JournalModeMember,
+    checkpointed_members, journal_mode_members, CheckpointMode, CheckpointedMember, CommitProtocol,
+    JournalMode, JournalModeMember,
 };
 use crate::kv::{
     kv_clear_namespace_raw, kv_compare_and_delete_raw, kv_compare_and_put_raw, kv_count_raw,
@@ -799,6 +799,35 @@ impl Database {
         // SAFETY: the request and result outlive the synchronous call.
         self.status(unsafe { zova_sys::zova_database_checkpoint(&request) })?;
         Ok(checkpointed_members(&out))
+    }
+
+    /// Experimental: switch this database set (the main database and each
+    /// attached bound store) to `protocol`, then open it again through this
+    /// handle. A set already in `protocol` is left as it is.
+    ///
+    /// Only native libraries built with `-Dexperimental-cwal` support it;
+    /// others fail with [`crate::Status::UnsupportedZovaVersion`]. It needs a
+    /// read-write handle on a file with every member in WAL mode
+    /// ([`crate::Status::Misuse`] otherwise, and for an in-memory database),
+    /// outside a transaction ([`crate::Status::ObjectTransactionActive`]),
+    /// with no other handle on the set ([`crate::Status::Busy`]), and with no
+    /// live statements, object readers or writers, subscriptions, or
+    /// registered SQL functions on this handle ([`crate::Status::Misuse`]):
+    /// register SQL functions after switching. A busy timeout set after open
+    /// returns to the value the handle was opened with.
+    ///
+    /// A CWAL set is detected at open. It has one writer: a second read-write
+    /// open fails with [`crate::Status::Busy`], and read-only opens are
+    /// unlimited. Do not open its member files with another SQLite library in
+    /// the same process: closing that connection releases this process's
+    /// POSIX locks on the file.
+    pub fn set_commit_protocol(&mut self, protocol: CommitProtocol) -> Result<()> {
+        let request = zova_sys::zova_database_set_commit_protocol_request {
+            db: self.raw_ptr(),
+            protocol: protocol.code(),
+        };
+        // SAFETY: the request outlives the synchronous call.
+        self.status(unsafe { zova_sys::zova_database_set_commit_protocol(&request) })
     }
 
     pub fn exec(&mut self, sql: &str) -> Result<()> {

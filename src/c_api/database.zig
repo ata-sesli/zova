@@ -43,6 +43,10 @@ const zova_database_reclaim_request = @import("types.zig").zova_database_reclaim
 const zova_database_set_journal_mode_request = @import("types.zig").zova_database_set_journal_mode_request;
 const zova_database_journal_modes_request = @import("types.zig").zova_database_journal_modes_request;
 const zova_database_checkpoint_request = @import("types.zig").zova_database_checkpoint_request;
+const zova_database_set_commit_protocol_request = @import("types.zig").zova_database_set_commit_protocol_request;
+const ZOVA_COMMIT_PROTOCOL_NONE = @import("types.zig").ZOVA_COMMIT_PROTOCOL_NONE;
+const ZOVA_COMMIT_PROTOCOL_CWAL = @import("types.zig").ZOVA_COMMIT_PROTOCOL_CWAL;
+const cwal_available = @import("../database/cwal_set.zig").available;
 const zova_journal_mode_report = @import("types.zig").zova_journal_mode_report;
 const ZOVA_AUTO_VACUUM_FULL = @import("types.zig").ZOVA_AUTO_VACUUM_FULL;
 const ZOVA_AUTO_VACUUM_INCREMENTAL = @import("types.zig").ZOVA_AUTO_VACUUM_INCREMENTAL;
@@ -354,6 +358,36 @@ pub fn zova_database_checkpoint(request: ?*const zova_database_checkpoint_reques
         };
     }
     out.member_count = result.count;
+    return okDb(handle);
+}
+
+pub fn zova_database_set_commit_protocol(request: ?*const zova_database_set_commit_protocol_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    defer handle.mutex.unlock();
+    const protocol: zova.Database.CommitProtocol = switch (req.protocol) {
+        ZOVA_COMMIT_PROTOCOL_NONE => .none,
+        ZOVA_COMMIT_PROTOCOL_CWAL => .cwal,
+        else => return failDb(handle, error.InvalidArgument),
+    };
+    // The switch reopens the connection: child handles would point at the
+    // closed one, and SQL functions registered on it would be gone while
+    // this handle still lists them.
+    if (cwal_available and protocol != handle.db.commitProtocol()) {
+        if (handle.live_statements != 0 or handle.live_writers != 0 or handle.live_readers != 0 or handle.live_subscriptions != 0 or handle.fresh_build_active) {
+            var message_buffer: [208]u8 = undefined;
+            const message = std.fmt.bufPrint(
+                &message_buffer,
+                "cannot change the commit protocol with live child handles: {d} statements, {d} object writers, {d} object readers, {d} subscriptions, fresh build active={}",
+                .{ handle.live_statements, handle.live_writers, handle.live_readers, handle.live_subscriptions, handle.fresh_build_active },
+            ) catch "cannot change the commit protocol with live child handles";
+            return failDbStatusString(handle, .MISUSE, message);
+        }
+        if (handle.sql_functions.items.len != 0) {
+            return failDbStatusString(handle, .MISUSE, "cannot change the commit protocol with registered SQL functions; register them after the change");
+        }
+    }
+    handle.db.setCommitProtocol(protocol) catch |err| return failDb(handle, err);
     return okDb(handle);
 }
 

@@ -42,6 +42,20 @@ const (
 	CheckpointTruncate CheckpointMode = C.ZOVA_CHECKPOINT_TRUNCATE
 )
 
+// CommitProtocol is how a database set commits a transaction that writes
+// more than one member file. The zero value is CommitProtocolNone.
+type CommitProtocol uint32
+
+const (
+	// CommitProtocolNone commits each member file on its own: SQLite's
+	// ordinary behavior.
+	CommitProtocolNone CommitProtocol = C.ZOVA_COMMIT_PROTOCOL_NONE
+	// CommitProtocolCWAL is the experimental cross-file commit protocol: a
+	// transaction that writes several members commits atomically across
+	// them.
+	CommitProtocolCWAL CommitProtocol = C.ZOVA_COMMIT_PROTOCOL_CWAL
+)
+
 // JournalModeMember is the journal mode of one member of a database set.
 type JournalModeMember struct {
 	Member      ProgressMember
@@ -137,6 +151,40 @@ func (db *DB) Checkpoint(mode CheckpointMode) ([]CheckpointedMember, error) {
 		}
 	}
 	return members, nil
+}
+
+// SetCommitProtocol switches the set this handle has open to protocol, then
+// opens it again through the same handle. Experimental: only libraries built
+// with -Dexperimental-cwal support it; others fail with
+// StatusUnsupportedZovaVersion for either protocol. A set already in protocol
+// returns nil without any change.
+//
+// It needs a read-write handle on a file (StatusReadOnly, StatusMisuse for an
+// in-memory database), outside a transaction (StatusObjectTransactionActive),
+// with every member in WAL mode, no other handle on the set (StatusBusy), and
+// no open statements, object writers or readers, subscriptions, fresh build or
+// registered SQL functions on this handle (StatusMisuse): register SQL
+// functions after switching. A busy timeout set after open returns to the
+// value the handle was opened with.
+//
+// With CWAL, a transaction that writes several members commits atomically
+// across them, and one read sees every member at one commit. Open detects a
+// CWAL set, so opening it needs no option. It has one writer: a second
+// read-write open fails with StatusBusy, and read-only opens are unlimited.
+// Do not open a member file with another SQLite library in the same process:
+// closing that connection releases this process's POSIX locks on the file,
+// including CWAL's. A CWAL set that crashed mid-commit while other handles had
+// it open fails with StatusCommitSetBroken (close every handle and reopen),
+// one that cannot be repaired safely with StatusCommitSetNeedsRepair, and a
+// member file that another open set owns with StatusMemberOwned.
+func (db *DB) SetCommitProtocol(protocol CommitProtocol) error {
+	return db.withLock(func() error {
+		request := C.zova_database_set_commit_protocol_request{
+			db:       db.ptr,
+			protocol: C.uint32_t(protocol),
+		}
+		return statusFromDB(db, C.zova_database_set_commit_protocol(&request))
+	})
 }
 
 func journalModeMembers(report *C.zova_journal_mode_report) []JournalModeMember {

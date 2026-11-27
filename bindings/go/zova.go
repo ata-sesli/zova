@@ -73,6 +73,9 @@ const (
 	StatusUnsupportedFutureFormat  Status = C.ZOVA_UNSUPPORTED_FUTURE_FORMAT
 	StatusUnsupportedLegacyFormat  Status = C.ZOVA_UNSUPPORTED_LEGACY_FORMAT
 	StatusNoMigrationPath          Status = C.ZOVA_NO_MIGRATION_PATH
+	StatusCommitSetBroken          Status = C.ZOVA_COMMIT_SET_BROKEN
+	StatusCommitSetNeedsRepair     Status = C.ZOVA_COMMIT_SET_NEEDS_REPAIR
+	StatusMemberOwned              Status = C.ZOVA_MEMBER_OWNED
 )
 
 // Step is the result of advancing a prepared statement.

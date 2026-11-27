@@ -45,7 +45,7 @@ import {
   checkpointedMember, journalModeMember, nativeExtensionOptions, reclaimedMember,
 } from "./types.js";
 import type {
-  CheckpointedMember, CheckpointModeName, JournalModeMember, JournalModeName,
+  CheckpointedMember, CheckpointModeName, CommitProtocolName, JournalModeMember, JournalModeName,
   CreateOptions, ExtensionInfo, ExtensionOptions, FormatInfo, KvEntry, KvScanOptions, KvScanPage, OpenOptions, ReclaimedMember,
   ReclaimOptions,
 } from "./types.js";
@@ -373,6 +373,28 @@ export class Database {
    */
   checkpoint(mode: CheckpointModeName = "passive"): CheckpointedMember[] {
     return callNative(() => this.#native.checkpoint(mode)).map(checkpointedMember);
+  }
+
+  /**
+   * Experimental: switch this database set (the main database and each
+   * attached bound store) to `protocol`, then open it again through this
+   * handle. A set already in `protocol` is left as it is.
+   *
+   * Only native libraries built with `-Dexperimental-cwal` support it; others
+   * throw `ZOVA_UNSUPPORTED_ZOVA_VERSION`. It needs a read-write handle on a
+   * file with every member in WAL mode, outside a transaction
+   * (`ZOVA_OBJECT_TRANSACTION_ACTIVE`), with no other handle on the set
+   * (`ZOVA_BUSY`), and with no open statements, object readers or writers,
+   * subscriptions, or registered SQL functions on this handle
+   * (`ZOVA_MISUSE`): register SQL functions after switching.
+   *
+   * A CWAL set has one writer: a second read-write open throws `ZOVA_BUSY`,
+   * and read-only opens are unlimited. Do not open its member files with
+   * another SQLite library in this process: closing that connection releases
+   * this process's POSIX locks on the file.
+   */
+  setCommitProtocol(protocol: CommitProtocolName): void {
+    callNative(() => this.#native.setCommitProtocol(protocol));
   }
 
   lastInsertRowid(): bigint {

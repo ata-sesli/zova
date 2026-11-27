@@ -3685,6 +3685,97 @@ test "c api journal mode and checkpoint cover the set and validate requests" {
     try std.testing.expectEqual(zova_status.OK, zova_database_rollback(&.{ .db = db }));
 }
 
+test "c api maps and names the commit-set statuses" {
+    try std.testing.expectEqual(@as(c_int, 39), @backingInt(zova_status.COMMIT_SET_BROKEN));
+    try std.testing.expectEqual(@as(c_int, 40), @backingInt(zova_status.COMMIT_SET_NEEDS_REPAIR));
+    try std.testing.expectEqual(@as(c_int, 41), @backingInt(zova_status.MEMBER_OWNED));
+    try std.testing.expectEqualStrings("ZOVA_COMMIT_SET_BROKEN", std.mem.span(zova_status_name(39)));
+    try std.testing.expectEqualStrings("ZOVA_COMMIT_SET_NEEDS_REPAIR", std.mem.span(zova_status_name(40)));
+    try std.testing.expectEqualStrings("ZOVA_MEMBER_OWNED", std.mem.span(zova_status_name(41)));
+
+    var db: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_create_memory(&.{ .out_db = &db, .out_error_message = null }));
+    defer _ = zova_database_close(db);
+    const handle = databaseHandleRaw(db).?;
+    const failDb = @import("c_api/errors.zig").failDb;
+    try std.testing.expectEqual(zova_status.COMMIT_SET_BROKEN, failDb(handle, error.CommitSetBroken));
+    try std.testing.expectEqual(zova_status.COMMIT_SET_NEEDS_REPAIR, failDb(handle, error.CommitSetNeedsRepair));
+    try std.testing.expectEqual(zova_status.MEMBER_OWNED, failDb(handle, error.MemberOwned));
+}
+
+test "c api set commit protocol validates the request and the handle" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/protocol.zova", .{tmp.sub_path[0..]}, 0);
+
+    var db: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{ .path = db_path, .out_db = &db, .out_error_message = null }));
+    defer _ = zova_database_close(db);
+    const handle = databaseHandleRaw(db).?;
+
+    try std.testing.expectEqual(@as(u32, 0), c_api_internal.ZOVA_COMMIT_PROTOCOL_NONE);
+    try std.testing.expectEqual(@as(u32, 1), c_api_internal.ZOVA_COMMIT_PROTOCOL_CWAL);
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, c_api_internal.zova_database_set_commit_protocol(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, c_api_internal.zova_database_set_commit_protocol(&.{ .db = null }));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, c_api_internal.zova_database_set_commit_protocol(&.{ .db = db, .protocol = 2 }));
+
+    const none_request: c_api_internal.zova_database_set_commit_protocol_request = .{ .db = db, .protocol = c_api_internal.ZOVA_COMMIT_PROTOCOL_NONE };
+    const cwal_request: c_api_internal.zova_database_set_commit_protocol_request = .{ .db = db, .protocol = c_api_internal.ZOVA_COMMIT_PROTOCOL_CWAL };
+    if (!@import("database/cwal_set.zig").available) {
+        try std.testing.expectEqual(zova_status.UNSUPPORTED_ZOVA_VERSION, c_api_internal.zova_database_set_commit_protocol(&none_request));
+        try std.testing.expectEqual(zova_status.UNSUPPORTED_ZOVA_VERSION, c_api_internal.zova_database_set_commit_protocol(&cwal_request));
+        return;
+    }
+    // Asking for the protocol the set already has changes nothing.
+    try std.testing.expectEqual(zova_status.OK, c_api_internal.zova_database_set_commit_protocol(&none_request));
+
+    // Every member must be in WAL mode first.
+    try std.testing.expectEqual(zova_status.MISUSE, c_api_internal.zova_database_set_commit_protocol(&cwal_request));
+    try std.testing.expectEqual(zova_status.OK, c_api_internal.zova_database_set_journal_mode(&.{ .db = db, .journal_mode = c_api_internal.ZOVA_JOURNAL_MODE_WAL }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_exec(&.{ .db = db, .sql = "create table rows(x); insert into rows values(1)" }));
+
+    try std.testing.expectEqual(zova_status.OK, zova_database_begin(&.{ .db = db }));
+    try std.testing.expectEqual(zova_status.OBJECT_TRANSACTION_ACTIVE, c_api_internal.zova_database_set_commit_protocol(&cwal_request));
+    try std.testing.expectEqual(zova_status.OK, zova_database_rollback(&.{ .db = db }));
+
+    // The switch reopens the connection, so the handle must hold no child
+    // handles and no registered SQL functions.
+    var stmt: ?*zova_statement = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_prepare(&.{ .db = db, .sql = "select x from rows", .out_statement = &stmt }));
+    try std.testing.expectEqual(zova_status.MISUSE, c_api_internal.zova_database_set_commit_protocol(&cwal_request));
+    try std.testing.expect(std.mem.indexOf(u8, std.mem.span(zova_database_last_error_message(db)), "1 statements") != null);
+    try std.testing.expectEqual(zova_status.OK, zova_statement_finalize(stmt));
+    try std.testing.expectEqual(zova.Database.CommitProtocol.none, handle.db.commitProtocol());
+
+    var functions: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_create_memory(&.{ .out_db = &functions, .out_error_message = null }));
+    defer _ = zova_database_close(functions);
+    try std.testing.expectEqual(zova_status.OK, zova_database_register_function(&.{ .db = functions, .name = "app_text", .arity = 0, .flags = 0, .user_data = null, .callback = sqlFunctionText, .destroy = null }));
+    try std.testing.expectEqual(zova_status.MISUSE, c_api_internal.zova_database_set_commit_protocol(&.{ .db = functions, .protocol = c_api_internal.ZOVA_COMMIT_PROTOCOL_CWAL }));
+    try std.testing.expect(std.mem.indexOf(u8, std.mem.span(zova_database_last_error_message(functions)), "SQL functions") != null);
+
+    try std.testing.expectEqual(zova_status.OK, c_api_internal.zova_database_set_commit_protocol(&cwal_request));
+    try std.testing.expectEqual(zova.Database.CommitProtocol.cwal, handle.db.commitProtocol());
+    try std.testing.expectEqual(zova_status.OK, c_api_internal.zova_database_set_commit_protocol(&cwal_request));
+
+    // One writer per set; readers are unlimited.
+    var second: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.BUSY, zova_database_open(&.{ .path = db_path, .out_db = &second, .out_error_message = null }));
+    var reader: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_open_with_options(&.{ .path = db_path, .flags = ZOVA_OPEN_READ_ONLY, .busy_timeout_ms = 0, .out_db = &reader, .out_error_message = null }));
+    try std.testing.expectEqual(zova_status.READ_ONLY, c_api_internal.zova_database_set_commit_protocol(&.{ .db = reader, .protocol = c_api_internal.ZOVA_COMMIT_PROTOCOL_NONE }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_close(reader));
+
+    try std.testing.expectEqual(zova_status.OK, zova_database_exec(&.{ .db = db, .sql = "insert into rows values(2)" }));
+    try std.testing.expectEqual(zova_status.OK, c_api_internal.zova_database_set_commit_protocol(&none_request));
+    try std.testing.expectEqual(zova.Database.CommitProtocol.none, handle.db.commitProtocol());
+    var count = try handle.db.prepare("select count(*) from rows");
+    defer count.deinit();
+    try std.testing.expectEqual(sqlite.Step.row, try count.step());
+    try std.testing.expectEqual(@as(i64, 2), count.columnInt64(0));
+}
+
 test "c abi object compression is a per-handle setting validated at the boundary" {
     var db: ?*zova_database = null;
     try std.testing.expectEqual(zova_status.OK, zova_database_create_memory(&.{

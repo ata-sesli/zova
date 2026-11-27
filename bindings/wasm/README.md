@@ -620,6 +620,7 @@ name is missing from the first column.
 | `LinkedPlugin` (`fromAddress`, `address`) and `ExtensionOptions` (`bundlePaths`, `trustStorePath`) | not applicable: browsers cannot load code at run time; link plugins into the module at build time |
 | `verifyExtensionBundle`, `trustExtensionBundle`, `untrustExtensionBundle` | not applicable: there are no `.zovaext` bundles or trust store in a browser |
 | `setJournalMode`, `journalModes`, `checkpoint` | not applicable: the browser runtime keeps every writable database in `DELETE` journal mode, and one connection owns a persistent name, so there is no WAL to select or checkpoint |
+| `setCommitProtocol` | not applicable: the experimental cross-file commit protocol (CWAL) needs WAL mode and POSIX file locks, and the browser build does not compile it |
 
 ## Current boundaries
 

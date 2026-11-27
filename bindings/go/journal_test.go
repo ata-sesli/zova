@@ -72,3 +72,63 @@ func TestInMemoryDatabaseKeepsMemoryJournalMode(t *testing.T) {
 		t.Fatalf("memory to WAL: got %v", err)
 	}
 }
+
+func TestSetCommitProtocolSwitchesAWALSetOrReportsAnUnsupportedLibrary(t *testing.T) {
+	for status, name := range map[Status]string{
+		StatusCommitSetBroken:      "ZOVA_COMMIT_SET_BROKEN",
+		StatusCommitSetNeedsRepair: "ZOVA_COMMIT_SET_NEEDS_REPAIR",
+		StatusMemberOwned:          "ZOVA_MEMBER_OWNED",
+	} {
+		if got := StatusName(status); got != name {
+			t.Fatalf("status %d name: got %q, want %q", status, got, name)
+		}
+	}
+
+	path := tempZovaPath(t, "commit-protocol")
+	db, err := Create(path)
+	must(t, err)
+	defer db.Close()
+	if err := db.SetCommitProtocol(CommitProtocol(2)); !errorStatusIs(err, StatusInvalidArgument) {
+		t.Fatalf("unknown protocol: got %v", err)
+	}
+
+	err = db.SetCommitProtocol(CommitProtocolCWAL)
+	if errorStatusIs(err, StatusUnsupportedZovaVersion) {
+		// A library built without -Dexperimental-cwal refuses either protocol.
+		if err := db.SetCommitProtocol(CommitProtocolNone); !errorStatusIs(err, StatusUnsupportedZovaVersion) {
+			t.Fatalf("none on an unsupported library: got %v", err)
+		}
+		return
+	}
+	if !errorStatusIs(err, StatusMisuse) {
+		t.Fatalf("CWAL outside WAL mode: got %v", err)
+	}
+
+	_, err = db.SetJournalMode(JournalModeWAL)
+	must(t, err)
+	must(t, db.Exec("create table rows(x)"))
+	must(t, db.Begin())
+	if err := db.SetCommitProtocol(CommitProtocolCWAL); !errorStatusIs(err, StatusObjectTransactionActive) {
+		t.Fatalf("switch in transaction: got %v", err)
+	}
+	must(t, db.Rollback())
+	must(t, db.SetCommitProtocol(CommitProtocolCWAL))
+	must(t, db.SetCommitProtocol(CommitProtocolCWAL))
+
+	if second, err := Open(path); !errorStatusIs(err, StatusBusy) {
+		if second != nil {
+			second.Close()
+		}
+		t.Fatalf("second writer: got %v", err)
+	}
+	reader, err := OpenWithOptions(path, OpenOptions{ReadOnly: true})
+	must(t, err)
+	if err := reader.SetCommitProtocol(CommitProtocolNone); !errorStatusIs(err, StatusReadOnly) {
+		t.Fatalf("switch on a reader: got %v", err)
+	}
+	must(t, reader.Close())
+
+	must(t, db.Exec("insert into rows values(1)"))
+	must(t, db.SetCommitProtocol(CommitProtocolNone))
+	must(t, db.Exec("insert into rows values(2)"))
+}

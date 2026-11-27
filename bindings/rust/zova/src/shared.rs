@@ -31,8 +31,8 @@ use crate::graph_keyed::{
     GraphScanPage, GraphWalkDirectionOptions, GraphWalkProfile,
 };
 use crate::journal::{
-    checkpointed_members, journal_mode_members, CheckpointMode, CheckpointedMember, JournalMode,
-    JournalModeMember,
+    checkpointed_members, journal_mode_members, CheckpointMode, CheckpointedMember, CommitProtocol,
+    JournalMode, JournalModeMember,
 };
 use crate::kv::{
     kv_clear_namespace_raw, kv_compare_and_delete_raw, kv_compare_and_put_raw, kv_count_raw,
@@ -600,6 +600,18 @@ impl SharedDatabase {
         self.inner
             .status_locked(unsafe { zova_sys::zova_database_checkpoint(&request) })?;
         Ok(checkpointed_members(&out))
+    }
+
+    /// [`crate::Database::set_commit_protocol`] for a shared handle.
+    pub fn set_commit_protocol(&self, protocol: CommitProtocol) -> Result<()> {
+        let _guard = self.inner.enter()?;
+        let request = zova_sys::zova_database_set_commit_protocol_request {
+            db: self.inner.raw_ptr(),
+            protocol: protocol.code(),
+        };
+        // SAFETY: the request outlives the synchronous call.
+        self.inner
+            .status_locked(unsafe { zova_sys::zova_database_set_commit_protocol(&request) })
     }
 
     /// [`SharedDatabase::backup_to`] that reports [`Progress`]; see

@@ -36,6 +36,9 @@ pub const zova_status = enum(c_int) {
     UNSUPPORTED_FUTURE_FORMAT = 36,
     UNSUPPORTED_LEGACY_FORMAT = 37,
     NO_MIGRATION_PATH = 38,
+    COMMIT_SET_BROKEN = 39,
+    COMMIT_SET_NEEDS_REPAIR = 40,
+    MEMBER_OWNED = 41,
     OBJECT_NOT_FOUND = 50,
     OBJECT_ALREADY_EXISTS = 51,
     OBJECT_CHUNK_NOT_FOUND = 52,
@@ -788,6 +791,14 @@ pub const zova_database_checkpoint_request = extern struct {
     db: ?*zova_database = null,
     mode: u32 = 0,
     out_result: ?*zova_checkpoint_result = null,
+};
+
+pub const ZOVA_COMMIT_PROTOCOL_NONE: u32 = 0;
+pub const ZOVA_COMMIT_PROTOCOL_CWAL: u32 = 1;
+
+pub const zova_database_set_commit_protocol_request = extern struct {
+    db: ?*zova_database = null,
+    protocol: u32 = 0,
 };
 
 pub const zova_database_restore_request = extern struct {

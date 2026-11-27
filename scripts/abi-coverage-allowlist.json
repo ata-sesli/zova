@@ -20,6 +20,7 @@
     "zova_graph_walk": "graphWalk goes through zova_graph_walk_direction, which takes the default outgoing direction",
     "zova_database_set_journal_mode": "the browser runtime keeps every writable database in DELETE journal mode with one connection per persistent name, so there is no WAL to select or checkpoint",
     "zova_database_journal_modes": "the browser runtime keeps every writable database in DELETE journal mode with one connection per persistent name, so there is no WAL to select or checkpoint",
-    "zova_database_checkpoint": "the browser runtime keeps every writable database in DELETE journal mode with one connection per persistent name, so there is no WAL to select or checkpoint"
+    "zova_database_checkpoint": "the browser runtime keeps every writable database in DELETE journal mode with one connection per persistent name, so there is no WAL to select or checkpoint",
+    "zova_database_set_commit_protocol": "the experimental cross-file commit protocol (CWAL) needs WAL mode and POSIX file locks, and the browser build does not compile it"
   }
 }

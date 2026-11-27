@@ -55,6 +55,10 @@ fn extension_upgrade_entrypoints_reject_null_requests() {
             zova_sys::ZOVA_INVALID_ARGUMENT
         );
         assert_eq!(
+            zova_sys::zova_database_set_commit_protocol(ptr::null()),
+            zova_sys::ZOVA_INVALID_ARGUMENT
+        );
+        assert_eq!(
             zova_sys::zova_database_extension_upgrade(ptr::null()),
             zova_sys::ZOVA_INVALID_ARGUMENT
         );
@@ -177,6 +181,27 @@ fn abi_version_and_status_names_are_available() {
             std::mem::size_of::<zova_sys::zova_database_checkpoint_request>(),
             24
         );
+        assert_eq!(zova_sys::ZOVA_COMMIT_PROTOCOL_NONE, 0);
+        assert_eq!(zova_sys::ZOVA_COMMIT_PROTOCOL_CWAL, 1);
+        assert_eq!(
+            std::mem::size_of::<zova_sys::zova_database_set_commit_protocol_request>(),
+            16
+        );
+        for (status, name) in [
+            (zova_sys::ZOVA_COMMIT_SET_BROKEN, "ZOVA_COMMIT_SET_BROKEN"),
+            (
+                zova_sys::ZOVA_COMMIT_SET_NEEDS_REPAIR,
+                "ZOVA_COMMIT_SET_NEEDS_REPAIR",
+            ),
+            (zova_sys::ZOVA_MEMBER_OWNED, "ZOVA_MEMBER_OWNED"),
+        ] {
+            assert_eq!(
+                CStr::from_ptr(zova_sys::zova_status_name(status))
+                    .to_str()
+                    .unwrap(),
+                name
+            );
+        }
         assert_eq!(
             CStr::from_ptr(zova_sys::zova_status_name(zova_sys::ZOVA_GRAPH_INVALID))
                 .to_str()

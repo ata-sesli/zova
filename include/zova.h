@@ -48,6 +48,7 @@
  * - This ABI exposes database lifecycle, SQL exec, prepared statements,
  *   explicit transactions, explicit vacuum, in-place free-page reclaim,
  *   set-wide journal mode and WAL checkpoints,
+ *   the experimental cross-file commit protocol (CWAL),
  *   conversion, backup, compact copy, restore-to-new-file, in-memory
  *   databases, objects, chunks, manifests, range reads, assembly,
  *   ObjectWriter, native vectors, and native graph relationships.
@@ -114,6 +115,9 @@ typedef enum zova_status {
     ZOVA_UNSUPPORTED_FUTURE_FORMAT = 36,
     ZOVA_UNSUPPORTED_LEGACY_FORMAT = 37,
     ZOVA_NO_MIGRATION_PATH = 38,
+    ZOVA_COMMIT_SET_BROKEN = 39,
+    ZOVA_COMMIT_SET_NEEDS_REPAIR = 40,
+    ZOVA_MEMBER_OWNED = 41,
     ZOVA_OBJECT_NOT_FOUND = 50,
     ZOVA_OBJECT_ALREADY_EXISTS = 51,
     ZOVA_OBJECT_CHUNK_NOT_FOUND = 52,
@@ -1038,6 +1042,43 @@ typedef struct zova_database_checkpoint_request {
     uint32_t mode;
     zova_checkpoint_result *out_result;
 } zova_database_checkpoint_request;
+
+/*
+ * Experimental: the commit protocol of a database set (the main database and
+ * its bound stores). Only libraries built with -Dexperimental-cwal support
+ * it; other builds return ZOVA_UNSUPPORTED_ZOVA_VERSION for either value.
+ * A set already in the requested protocol returns ZOVA_OK without any change.
+ *
+ * With CWAL, a transaction that writes several members commits atomically
+ * across them, and one read sees every member at one commit. A CWAL set is
+ * detected at open, so opening it needs no option. It has one writer: a
+ * second read-write open returns ZOVA_BUSY, and read-only opens are
+ * unlimited. Do not open a member file with another SQLite library in the
+ * same process: closing that connection releases this process's POSIX locks
+ * on the file, including CWAL's.
+ *
+ * zova_database_set_commit_protocol switches the set this handle has open,
+ * then opens it again through the same handle. It needs a read-write handle
+ * on a file (ZOVA_READ_ONLY, ZOVA_MISUSE for an in-memory database), outside
+ * an explicit transaction (ZOVA_OBJECT_TRANSACTION_ACTIVE), with every member
+ * in WAL mode, no other handle on the set (ZOVA_BUSY), and no live child
+ * handles or registered SQL functions on this handle (ZOVA_MISUSE): register
+ * SQL functions after switching. A busy timeout set after open returns to
+ * the value the handle was opened with.
+ * A CWAL set that crashed mid-commit while other handles had it open fails
+ * with ZOVA_COMMIT_SET_BROKEN (close every handle and reopen), one that
+ * cannot be repaired safely with ZOVA_COMMIT_SET_NEEDS_REPAIR, and a member
+ * file that another open set owns with ZOVA_MEMBER_OWNED.
+ */
+typedef enum zova_commit_protocol {
+    ZOVA_COMMIT_PROTOCOL_NONE = 0,
+    ZOVA_COMMIT_PROTOCOL_CWAL = 1
+} zova_commit_protocol;
+
+typedef struct zova_database_set_commit_protocol_request {
+    zova_database *db;
+    uint32_t protocol;
+} zova_database_set_commit_protocol_request;
 
 typedef struct zova_database_restore_request {
     const char *source_path;
@@ -2189,6 +2230,7 @@ zova_status zova_database_reclaim(const zova_database_reclaim_request *request);
 zova_status zova_database_set_journal_mode(const zova_database_set_journal_mode_request *request);
 zova_status zova_database_journal_modes(const zova_database_journal_modes_request *request);
 zova_status zova_database_checkpoint(const zova_database_checkpoint_request *request);
+zova_status zova_database_set_commit_protocol(const zova_database_set_commit_protocol_request *request);
 zova_status zova_database_set_busy_timeout(const zova_database_busy_timeout_request *request);
 zova_status zova_database_last_insert_rowid(const zova_database_last_insert_rowid_request *request);
 zova_status zova_database_changes(const zova_database_changes_request *request);

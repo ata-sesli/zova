@@ -101,6 +101,9 @@ mod tests {
             zova::Status::UnsupportedFutureFormat,
             zova::Status::UnsupportedLegacyFormat,
             zova::Status::NoMigrationPath,
+            zova::Status::CommitSetBroken,
+            zova::Status::CommitSetNeedsRepair,
+            zova::Status::MemberOwned,
             zova::Status::Unknown(-91),
         ];
 

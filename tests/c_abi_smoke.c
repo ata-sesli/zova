@@ -3576,6 +3576,27 @@ int main(int argc, char **argv) {
                   }),
                   ZOVA_INVALID_ARGUMENT,
                   "reject journal mode OFF");
+    expect_status(zova_database_set_commit_protocol(&(zova_database_set_commit_protocol_request){.db = db, .protocol = 2}),
+                  ZOVA_INVALID_ARGUMENT,
+                  "reject an unknown commit protocol");
+    {
+        // Builds without -Dexperimental-cwal refuse; CWAL builds refuse this
+        // handle because it has a registered SQL function.
+        zova_status cwal_status = zova_database_set_commit_protocol(&(zova_database_set_commit_protocol_request){
+            .db = db,
+            .protocol = ZOVA_COMMIT_PROTOCOL_CWAL,
+        });
+        if (cwal_status != ZOVA_UNSUPPORTED_ZOVA_VERSION && cwal_status != ZOVA_MISUSE) {
+            fprintf(stderr, "switch to CWAL: unexpected %s\n", zova_status_name(cwal_status));
+            return 1;
+        }
+    }
+    if (strcmp(zova_status_name(ZOVA_COMMIT_SET_BROKEN), "ZOVA_COMMIT_SET_BROKEN") != 0 ||
+        strcmp(zova_status_name(ZOVA_COMMIT_SET_NEEDS_REPAIR), "ZOVA_COMMIT_SET_NEEDS_REPAIR") != 0 ||
+        strcmp(zova_status_name(ZOVA_MEMBER_OWNED), "ZOVA_MEMBER_OWNED") != 0) {
+        fprintf(stderr, "commit-set status names: unexpected\n");
+        return 1;
+    }
     expect_status(zova_database_set_journal_mode(&(zova_database_set_journal_mode_request){
                       .db = db,
                       .journal_mode = ZOVA_JOURNAL_MODE_DELETE,

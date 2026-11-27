@@ -7,10 +7,10 @@ use napi::{Env, Result, Task};
 use napi_derive::napi;
 
 use crate::database::{
-    native_kv_scan_page, parse_checkpoint_mode, parse_journal_mode, reclaim_options, DatabaseState,
-    ExtensionSelection, NativeCheckpointedMember, NativeDatabase, NativeExtensionOptions,
-    NativeFormatInfo, NativeJournalModeMember, NativeKvEntry, NativeKvScanOptions,
-    NativeKvScanPage, NativeReclaimedMember, OwnedKvScanOptions,
+    native_kv_scan_page, parse_checkpoint_mode, parse_commit_protocol, parse_journal_mode,
+    reclaim_options, DatabaseState, ExtensionSelection, NativeCheckpointedMember, NativeDatabase,
+    NativeExtensionOptions, NativeFormatInfo, NativeJournalModeMember, NativeKvEntry,
+    NativeKvScanOptions, NativeKvScanPage, NativeReclaimedMember, OwnedKvScanOptions,
 };
 use crate::error::zova_error;
 use crate::graph::{
@@ -108,6 +108,34 @@ impl Task for ExecTask {
             .expect("task state")
             .database
             .exec(&self.sql)
+            .map_err(zova_error)
+    }
+
+    fn resolve(&mut self, _: Env, _: Self::Output) -> Result<Self::JsValue> {
+        Ok(())
+    }
+
+    fn finally(mut self, _: Env) -> Result<()> {
+        self.state.take().expect("task state").finish();
+        Ok(())
+    }
+}
+
+pub struct CommitProtocolTask {
+    state: Option<DatabaseTaskState>,
+    protocol: zova::CommitProtocol,
+}
+
+impl Task for CommitProtocolTask {
+    type Output = ();
+    type JsValue = ();
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.state
+            .as_ref()
+            .expect("task state")
+            .database
+            .set_commit_protocol(self.protocol)
             .map_err(zova_error)
     }
 
@@ -927,6 +955,17 @@ impl NativeDatabase {
     pub fn async_journal_modes(&self) -> Result<AsyncTask<JournalModeTask>> {
         Ok(AsyncTask::new(JournalModeTask {
             mode: None,
+            state: Some(DatabaseTaskState::new(self)?),
+        }))
+    }
+
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn async_set_commit_protocol(
+        &self,
+        protocol: String,
+    ) -> Result<AsyncTask<CommitProtocolTask>> {
+        Ok(AsyncTask::new(CommitProtocolTask {
+            protocol: parse_commit_protocol(&protocol)?,
             state: Some(DatabaseTaskState::new(self)?),
         }))
     }

@@ -327,6 +327,9 @@ pub const zova_database_journal_modes_request = @import("c_api/types.zig").zova_
 pub const zova_checkpointed_member = @import("c_api/types.zig").zova_checkpointed_member;
 pub const zova_checkpoint_result = @import("c_api/types.zig").zova_checkpoint_result;
 pub const zova_database_checkpoint_request = @import("c_api/types.zig").zova_database_checkpoint_request;
+pub const ZOVA_COMMIT_PROTOCOL_NONE = @import("c_api/types.zig").ZOVA_COMMIT_PROTOCOL_NONE;
+pub const ZOVA_COMMIT_PROTOCOL_CWAL = @import("c_api/types.zig").ZOVA_COMMIT_PROTOCOL_CWAL;
+pub const zova_database_set_commit_protocol_request = @import("c_api/types.zig").zova_database_set_commit_protocol_request;
 
 pub const zova_database_restore_request = @import("c_api/types.zig").zova_database_restore_request;
 
@@ -726,6 +729,7 @@ pub const zova_database_reclaim = @import("c_api/database.zig").zova_database_re
 pub const zova_database_set_journal_mode = @import("c_api/database.zig").zova_database_set_journal_mode;
 pub const zova_database_journal_modes = @import("c_api/database.zig").zova_database_journal_modes;
 pub const zova_database_checkpoint = @import("c_api/database.zig").zova_database_checkpoint;
+pub const zova_database_set_commit_protocol = @import("c_api/database.zig").zova_database_set_commit_protocol;
 
 pub const zova_database_set_busy_timeout = @import("c_api/database.zig").zova_database_set_busy_timeout;
 

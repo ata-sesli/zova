@@ -53,12 +53,21 @@ idiomatic safe representation.
 | Opaque-key topology, payloads, scans, fresh build | Yes | Yes | Yes | Yes | Yes | Yes |
 | Store create/bind/split management | Zig/CLI | Selected operations | No | No | No | No |
 | Application-authored callbacks/extensions | Selected surfaces | Selected surfaces | SQL functions, linked plugins | SQL functions, linked plugins | SQL functions, linked plugins | SQL functions, linked plugins |
+| Cross-file commit protocol (CWAL), experimental | Yes | Yes | Yes | Yes | Yes | Yes |
 
 The low-level opaque-key and fresh-build APIs are supported C ABI contracts,
 not private implementation hooks. The safe Rust crate, the Python package,
 the Go package, and the native JavaScript/TypeScript package expose every C
 ABI function. In JavaScript the low-level surfaces are on the synchronous
 `Database`; `AsyncDatabase` remains a queued subset.
+
+The cross-file commit protocol (CWAL, `zova_database_set_commit_protocol` and
+the statuses `ZOVA_COMMIT_SET_BROKEN`, `ZOVA_COMMIT_SET_NEEDS_REPAIR` and
+`ZOVA_MEMBER_OWNED`) is experimental and outside the stable 1.x contract. Only
+libraries built with `-Dexperimental-cwal` support it; other builds return
+`ZOVA_UNSUPPORTED_ZOVA_VERSION`. The call's name and the status numbers are
+reserved, but its behavior may change, and the browser package does not offer
+it.
 
 ## Errors and statuses
 

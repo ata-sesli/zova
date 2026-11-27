@@ -54,3 +54,31 @@ def test_in_memory_database_keeps_memory_mode():
         with pytest.raises(zova.ZovaError) as exc:
             db.set_journal_mode("wal")
         assert exc.value.status_name == "ZOVA_INVALID_ARGUMENT"
+
+
+def test_set_commit_protocol_switches_a_wal_set_or_reports_an_unsupported_library(tmp_path):
+    path = str(tmp_path / "protocol.zova")
+    with zova.Database.create(path) as db:
+        with pytest.raises(ValueError):
+            db.set_commit_protocol("bogus")
+        try:
+            db.set_commit_protocol("cwal")
+        except zova.ZovaError as error:
+            if error.status_name == "ZOVA_UNSUPPORTED_ZOVA_VERSION":
+                # A native library built without -Dexperimental-cwal.
+                with pytest.raises(zova.ZovaError) as exc:
+                    db.set_commit_protocol("none")
+                assert exc.value.status_name == "ZOVA_UNSUPPORTED_ZOVA_VERSION"
+                return
+            # CWAL needs every member in WAL mode.
+            assert error.status_name == "ZOVA_MISUSE"
+        else:
+            pytest.fail("a rollback-journal set switched to CWAL")
+
+        db.set_journal_mode("wal")
+        db.exec("create table rows(x)")
+        db.set_commit_protocol("cwal")
+        with pytest.raises(zova.ZovaError) as exc:
+            zova.Database.open(path)
+        assert exc.value.status_name == "ZOVA_BUSY"
+        db.set_commit_protocol("none")

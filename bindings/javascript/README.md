@@ -94,6 +94,10 @@ The synchronous `Database` facade exposes:
   store together or restores them and fails, `journalModes()`, and
   `checkpoint(mode = "passive")`, which returns WAL and checkpointed frame
   counts per member (see `docs/concurrency.md`)
+- experimental `setCommitProtocol("cwal" | "none")`, also on `AsyncDatabase`,
+  which switches the set to or from the cross-file commit protocol (CWAL) and
+  reopens the handle; only native libraries built with `-Dexperimental-cwal`
+  support it (see `docs/concurrency.md`)
 - storage-format probing and explicit copy-forward migration (`probeFormat`,
   `migrateDatabase`, and their async `AsyncDatabase` counterparts), with the
   same optional `ExtensionOptions` as `Database.open` for databases with a

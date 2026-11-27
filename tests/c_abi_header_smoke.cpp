@@ -30,6 +30,11 @@ static_assert(ZOVA_MIGRATION_REQUIRED == 35, "migration status values are stable
 static_assert(ZOVA_UNSUPPORTED_FUTURE_FORMAT == 36, "future format status values are stable");
 static_assert(ZOVA_UNSUPPORTED_LEGACY_FORMAT == 37, "legacy format status values are stable");
 static_assert(ZOVA_NO_MIGRATION_PATH == 38, "no migration path status values are stable");
+static_assert(ZOVA_COMMIT_SET_BROKEN == 39 && ZOVA_COMMIT_SET_NEEDS_REPAIR == 40 && ZOVA_MEMBER_OWNED == 41,
+              "commit-set status values are stable");
+static_assert(ZOVA_COMMIT_PROTOCOL_NONE == 0 && ZOVA_COMMIT_PROTOCOL_CWAL == 1, "commit protocol values are stable");
+static_assert(sizeof(zova_database_set_commit_protocol_request) == 16, "set commit protocol request is fixed layout");
+static_assert(offsetof(zova_database_set_commit_protocol_request, protocol) == 8, "set commit protocol request layout is stable");
 static_assert(ZOVA_FORMAT_CURRENT == 0, "format compatibility values are stable");
 static_assert(ZOVA_FORMAT_MIGRATABLE == 1, "format compatibility values are stable");
 static_assert(ZOVA_FORMAT_UNSUPPORTED_LEGACY == 2, "format compatibility values are stable");
@@ -103,6 +108,7 @@ int main() {
         zova_database_set_journal_mode(nullptr) != ZOVA_INVALID_ARGUMENT ||
         zova_database_journal_modes(nullptr) != ZOVA_INVALID_ARGUMENT ||
         zova_database_checkpoint(nullptr) != ZOVA_INVALID_ARGUMENT ||
+        zova_database_set_commit_protocol(nullptr) != ZOVA_INVALID_ARGUMENT ||
         zova_database_extension_upgrade(nullptr) != ZOVA_INVALID_ARGUMENT ||
         zova_database_extension_rebuild(nullptr) != ZOVA_INVALID_ARGUMENT) return 1;
     zova_database *db = nullptr;

@@ -57,6 +57,13 @@ pub enum Status {
     UnsupportedFutureFormat,
     UnsupportedLegacyFormat,
     NoMigrationPath,
+    /// A CWAL set crashed mid-commit while other handles had it open: close
+    /// every handle on the set and open it again.
+    CommitSetBroken,
+    /// A CWAL set cannot be repaired safely at open.
+    CommitSetNeedsRepair,
+    /// A member file is owned by another open CWAL set.
+    MemberOwned,
     Unknown(i32),
 }
 
@@ -113,6 +120,9 @@ impl Status {
             zova_sys::ZOVA_UNSUPPORTED_FUTURE_FORMAT => Self::UnsupportedFutureFormat,
             zova_sys::ZOVA_UNSUPPORTED_LEGACY_FORMAT => Self::UnsupportedLegacyFormat,
             zova_sys::ZOVA_NO_MIGRATION_PATH => Self::NoMigrationPath,
+            zova_sys::ZOVA_COMMIT_SET_BROKEN => Self::CommitSetBroken,
+            zova_sys::ZOVA_COMMIT_SET_NEEDS_REPAIR => Self::CommitSetNeedsRepair,
+            zova_sys::ZOVA_MEMBER_OWNED => Self::MemberOwned,
             other => Self::Unknown(other),
         }
     }
@@ -169,6 +179,9 @@ impl Status {
             Self::UnsupportedFutureFormat => zova_sys::ZOVA_UNSUPPORTED_FUTURE_FORMAT,
             Self::UnsupportedLegacyFormat => zova_sys::ZOVA_UNSUPPORTED_LEGACY_FORMAT,
             Self::NoMigrationPath => zova_sys::ZOVA_NO_MIGRATION_PATH,
+            Self::CommitSetBroken => zova_sys::ZOVA_COMMIT_SET_BROKEN,
+            Self::CommitSetNeedsRepair => zova_sys::ZOVA_COMMIT_SET_NEEDS_REPAIR,
+            Self::MemberOwned => zova_sys::ZOVA_MEMBER_OWNED,
             Self::Unknown(code) => code,
         }
     }

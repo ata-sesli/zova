@@ -265,6 +265,18 @@ pub(crate) fn parse_journal_mode(mode: &str) -> Result<zova::JournalMode> {
     })
 }
 
+pub(crate) fn parse_commit_protocol(protocol: &str) -> Result<zova::CommitProtocol> {
+    Ok(match protocol {
+        "none" => zova::CommitProtocol::None,
+        "cwal" => zova::CommitProtocol::Cwal,
+        _ => {
+            return Err(invalid_argument_error(
+                "commit protocol must be \"none\" or \"cwal\"",
+            ))
+        }
+    })
+}
+
 pub(crate) fn parse_checkpoint_mode(mode: Option<&str>) -> Result<zova::CheckpointMode> {
     Ok(match mode.unwrap_or("passive") {
         "passive" => zova::CheckpointMode::Passive,
@@ -730,6 +742,15 @@ impl NativeDatabase {
             .into_iter()
             .map(NativeCheckpointedMember::from)
             .collect())
+    }
+
+    #[napi]
+    pub fn set_commit_protocol(&self, protocol: String) -> Result<()> {
+        let protocol = parse_commit_protocol(&protocol)?;
+        self.state
+            .database()?
+            .set_commit_protocol(protocol)
+            .map_err(zova_error)
     }
 
     #[napi]

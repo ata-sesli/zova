@@ -95,6 +95,7 @@ export type {
   AutoVacuumMode,
   CheckpointedMember,
   CheckpointModeName,
+  CommitProtocolName,
   JournalModeMember,
   JournalModeName,
   ExtensionOptions,

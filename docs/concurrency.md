@@ -156,6 +156,45 @@ Recommendation:
 Every handle that opens the main database attaches the bound stores recorded
 in it, so readers need no extra setup.
 
+### Cross-file commit protocol (experimental)
+
+Libraries built with `-Dexperimental-cwal` offer a third choice for a WAL set
+with bound stores: the cross-file commit protocol (CWAL). On a CWAL set, a
+transaction that writes several members commits atomically across them, even
+across a crash, and one read transaction sees every member at one commit, so
+neither limit above applies. Other builds refuse the call with an
+unsupported-version error.
+
+| Surface | Switch the set |
+| --- | --- |
+| Zig | `Database.setCommitProtocol(.cwal)` / `(.none)` |
+| C | `zova_database_set_commit_protocol` with `ZOVA_COMMIT_PROTOCOL_CWAL` or `ZOVA_COMMIT_PROTOCOL_NONE` |
+| Rust | `set_commit_protocol(CommitProtocol::Cwal)` |
+| Python | `set_commit_protocol("cwal")` |
+| Go | `SetCommitProtocol(CommitProtocolCWAL)` |
+| JavaScript | `setCommitProtocol("cwal")` |
+
+- **Switching** reopens the handle that calls it. Every member must already be
+  in WAL mode, and the handle must be read-write, on a file, outside a
+  transaction, the only handle on the set, and without open statements,
+  object readers or writers, subscriptions, a fresh build or registered SQL
+  functions. Register SQL functions after switching. A busy timeout set after
+  open returns to the value the handle was opened with.
+- **Opening** needs no option: open detects a CWAL set.
+- **One writer.** A second read-write open of a CWAL set fails with a busy
+  error. Read-only handles are unlimited and run beside the writer.
+- **Do not open a member file with another SQLite library in the same
+  process,** such as Python's `sqlite3` or a second copy of SQLite linked into
+  the application. POSIX file locks belong to the process, so closing that
+  connection releases every lock this process holds on the file, including
+  CWAL's.
+- **Errors.** A set that crashed mid-commit while other handles had it open
+  fails with `CommitSetBroken` until every handle closes and it is opened
+  again; a set that cannot be repaired safely fails with
+  `CommitSetNeedsRepair`; a member file that another open set owns fails with
+  `MemberOwned`.
+- The browser package does not offer CWAL.
+
 ## Notifications do not cross handles
 
 Notifications are in-memory and belong to the handle that published them. A
