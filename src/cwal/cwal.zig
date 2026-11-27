@@ -37,6 +37,18 @@ const shm_region_size = 32768;
 // WAL_FRAME_HDRSIZE).
 const wal_write_lock = 0;
 const native_endian = @import("builtin").cpu.arch.endian();
+/// Darwin's fsync neither flushes the drive's write cache nor orders writes;
+/// only F_FULLFSYNC does both. The protocol depends on the order in which
+/// synced WALs and markers reach the disk, so CWAL sets use it there.
+const full_fsync = @import("builtin").os.tag.isDarwin();
+
+/// Sync `fd` to stable storage. On Darwin this is F_FULLFSYNC, with fsync
+/// as the fallback for a filesystem that does not support it (as SQLite's
+/// own full_fsync does).
+fn syncDurably(fd: c_int) c_int {
+    if (full_fsync and sys.fcntl(fd, sys.F_FULLFSYNC, @as(c_int, 0)) == 0) return 0;
+    return sys.fsync(fd);
+}
 const wal_ckpt_lock = 1;
 /// WAL_READ_LOCK(0): a checkpointer takes it after choosing how far to
 /// copy and before recording that choice (nBackfillAttempted).
@@ -502,7 +514,7 @@ fn truncateDurably(fd: c_int, path: [:0]const u8, size: i64, comptime tag: []con
     if (sys.ftruncate(fd, size) != 0) return error.Io;
     fault.event(tag ++ "-fsync");
     if (fault.shouldFail(tag ++ "-fsync")) return error.Io;
-    if (sys.fsync(fd) != 0) return error.Io;
+    if (syncDurably(fd) != 0) return error.Io;
     if (fault.powerLoss()) overlay.synced(path, false);
 }
 
@@ -1457,7 +1469,8 @@ pub const Conn = struct {
         const deny = switch (action) {
             c.SQLITE_INSERT, c.SQLITE_UPDATE, c.SQLITE_DELETE, c.SQLITE_DROP_TABLE, c.SQLITE_DROP_TEMP_TABLE => isMarker(a1),
             c.SQLITE_ALTER_TABLE, c.SQLITE_CREATE_TRIGGER, c.SQLITE_CREATE_TEMP_TRIGGER => isMarker(a2),
-            c.SQLITE_PRAGMA => a2 != null and (isName(a1, "journal_mode") or isName(a1, "locking_mode") or isName(a1, "synchronous") or isName(a1, "writable_schema")),
+            c.SQLITE_PRAGMA => a2 != null and (isName(a1, "journal_mode") or isName(a1, "locking_mode") or isName(a1, "synchronous") or isName(a1, "writable_schema") or
+                (full_fsync and (isName(a1, "fullfsync") or isName(a1, "checkpoint_fullfsync")))),
             c.SQLITE_ATTACH, c.SQLITE_DETACH => true,
             else => false,
         };
@@ -1510,6 +1523,9 @@ pub const Conn = struct {
         }
         _ = c.sqlite3_wal_autocheckpoint(db, 0);
         if (options.mode == .cwal) {
+            // Connection-wide: SQLite's commit and checkpoint syncs on every
+            // member become F_FULLFSYNC.
+            if (full_fsync) try conn.exec("pragma fullfsync=1; pragma checkpoint_fullfsync=1");
             // Every member must be in WAL mode. Switch one that is not (WAL
             // mode persists); this fails while another connection has it
             // open in another mode.
