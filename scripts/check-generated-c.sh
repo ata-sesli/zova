@@ -73,6 +73,7 @@ clang -std=c99 \
     -DSQLITE_ENABLE_GEOPOLY \
     -DSQLITE_ENABLE_CARRAY \
     -DSQLITE_ENABLE_MATH_FUNCTIONS \
+    -DSQLITE_ENABLE_SNAPSHOT \
     -I "$BUNDLE" \
     -O2 \
     -c "$BUNDLE/sqlite3.c" \

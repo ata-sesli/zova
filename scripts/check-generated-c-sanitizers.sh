@@ -54,6 +54,7 @@ clang -std=c99 \
     -DSQLITE_ENABLE_GEOPOLY \
     -DSQLITE_ENABLE_CARRAY \
     -DSQLITE_ENABLE_MATH_FUNCTIONS \
+    -DSQLITE_ENABLE_SNAPSHOT \
     -I "$BUNDLE" \
     -c "$BUNDLE/sqlite3.c" \
     -o "$TMP/sqlite3.o"

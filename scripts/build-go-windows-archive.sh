@@ -23,7 +23,7 @@ $CC -std=c11 -O2 -Wno-incompatible-pointer-types -I "$TMP/generated" \
     -c "$TMP/generated/zova_c.c" -o "$TMP/zova.o"
 # The same SQLite options as scripts/check-plugin-packages.py.
 $CC -std=c99 -O2 -DSQLITE_THREADSAFE=1 -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_DBSTAT_VTAB \
-    -DSQLITE_ENABLE_RTREE -DSQLITE_ENABLE_GEOPOLY -DSQLITE_ENABLE_CARRAY -DSQLITE_ENABLE_MATH_FUNCTIONS \
+    -DSQLITE_ENABLE_RTREE -DSQLITE_ENABLE_GEOPOLY -DSQLITE_ENABLE_CARRAY -DSQLITE_ENABLE_MATH_FUNCTIONS -DSQLITE_ENABLE_SNAPSHOT \
     -I "$TMP/generated" -c "$TMP/generated/sqlite3.c" -o "$TMP/sqlite.o"
 rm -f "$OUT/libzova_c.a"
 zig ar rcs "$OUT/libzova_c.a" "$TMP/zova.o" "$TMP/sqlite.o"

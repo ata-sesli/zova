@@ -15,6 +15,9 @@ const sqlite_production_c_flags = &.{
     "-DSQLITE_ENABLE_GEOPOLY",
     "-DSQLITE_ENABLE_CARRAY",
     "-DSQLITE_ENABLE_MATH_FUNCTIONS",
+    // sqlite3_snapshot_* for the experimental cross-file commit protocol.
+    // Adds API only; set on every native build so generated C does not fork.
+    "-DSQLITE_ENABLE_SNAPSHOT",
 };
 
 pub fn build(b: *std.Build) void {
@@ -45,6 +48,8 @@ pub fn build(b: *std.Build) void {
 
     const zova_build_options = b.addOptions();
     zova_build_options.addOption(bool, "enable_dynamic_extensions", enable_dynamic_extensions);
+    const experimental_cwal = b.option(bool, "experimental-cwal", "Enable the experimental cross-file commit protocol (CWAL)") orelse false;
+    zova_build_options.addOption(bool, "experimental_cwal", experimental_cwal);
 
     _ = b.addTranslateC(.{
         .root_source_file = b.path("vendor/sqlite3.53.4/sqlite3.h"),
