@@ -940,6 +940,23 @@ pub const Database = struct {
     raw_chunk_table: bool = false,
     graph_walk_scratch: graph_walk_scratch.GraphWalkScratch = graph_walk_scratch.GraphWalkScratch.init(),
     extension_registry: ExtensionRegistry = ExtensionRegistry.empty(),
+    /// The CWAL set handle that owns `sqlite_db`, on a handle opened through
+    /// the experimental cross-file commit protocol (database/cwal_set.zig).
+    cwal_conn: ?*cwal_set.Conn = null,
+    /// How this handle was opened, so `setCommitProtocol` can open the set
+    /// again. Null on handles that cannot change the protocol.
+    reopen: ?Reopen = null,
+
+    const Reopen = struct { options: OpenOptions, extension_mode: ExtensionOpenMode };
+
+    /// The commit protocol of a Zova set (main and its bound stores).
+    pub const CommitProtocol = enum {
+        /// Each member commits on its own; a transaction that writes several
+        /// members is not atomic across them after a crash.
+        none,
+        /// Experimental cross-file commit protocol (`-Dexperimental-cwal`).
+        cwal,
+    };
 
     /// Create a new initialized `.zova` database.
     ///
@@ -1002,7 +1019,12 @@ pub const Database = struct {
         try extension_impl.registerSqlForInstalled(&raw, registry);
         const notifications = try initNotifications(&raw);
         errdefer deinitNotifications(notifications);
-        return .{ .sqlite_db = raw, .notifications = notifications, .extension_registry = registry };
+        return .{
+            .sqlite_db = raw,
+            .notifications = notifications,
+            .extension_registry = registry,
+            .reopen = if (memory) null else .{ .options = .{}, .extension_mode = .enforce },
+        };
     }
 
     /// Create a new initialized volatile in-memory database.
@@ -1111,15 +1133,33 @@ pub const Database = struct {
         try registry.validate();
         if (!isZovaPath(path)) return error.NotZovaPath;
         try ensurePathExists(path);
-        try commit_protocol.refuseRawFlag(path);
+        if (try commit_protocol.rawFlagSet(path)) {
+            if (!cwal_set.available) return error.UnsupportedZovaVersion;
+            if (!load_bound_stores) return error.UnsupportedZovaVersion;
+            return openCwal(path, options, registry, extension_mode);
+        }
 
         const flags: sqlite.OpenFlags = if (options.read_only) .read_only else .read_write;
         var raw = try sqlite.Database.openWithFlags(path, flags);
-        errdefer raw.deinit();
+        var raw_open = true;
+        errdefer if (raw_open) raw.deinit();
+        if (options.busy_timeout_ms != 0) try raw.setBusyTimeout(options.busy_timeout_ms);
+        if (cwal_set.available and load_bound_stores and try commit_protocol.sqliteFlagSet(&raw)) {
+            // An enable committed the flag but stopped before checkpointing
+            // it. A writer finishes it, then opens the set as CWAL; a reader
+            // must not write, so the set needs a read-write open first.
+            if (options.read_only) {
+                _ = sqlite.c.sqlite3_db_config(raw.handle, sqlite.c.SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, @as(c_int, 1), @as(?*c_int, null));
+                return error.CommitSetNeedsRepair;
+            }
+            try cwal_set.finishEnable(&raw);
+            raw_open = false;
+            raw.deinit();
+            return openCwal(path, options, registry, extension_mode);
+        }
         try commit_protocol.refuseSqliteFlag(&raw);
 
         try enableForeignKeys(&raw);
-        if (options.busy_timeout_ms != 0) try raw.setBusyTimeout(options.busy_timeout_ms);
         try validateZovaSchema(&raw);
         try @import("vector_maintenance.zig").register(&raw);
         const bound_object_store = if (load_bound_stores)
@@ -1137,6 +1177,12 @@ pub const Database = struct {
         else
             null;
         errdefer if (bound_graph_store != null) raw.detachDatabase(bound_graph_store_schema_name) catch {};
+        if (load_bound_stores and !options.read_only and try commit_protocol.mainDeclaresProtocol(&raw)) {
+            // What a stopped enable, or a disable past its commit point, left.
+            var schemas: [4][:0]const u8 = undefined;
+            const members = memberSchemas(&schemas, bound_object_store != null, bound_vector_store != null, bound_graph_store != null);
+            try commit_protocol.removeLeftovers(&raw, members);
+        }
         try vector_sql.register(&raw);
         try graph_sql.register(&raw);
         switch (extension_mode) {
@@ -1155,7 +1201,121 @@ pub const Database = struct {
             .bound_vector_store = bound_vector_store,
             .bound_graph_store = bound_graph_store,
             .extension_registry = registry,
+            .reopen = if (load_bound_stores) .{ .options = options, .extension_mode = extension_mode } else null,
         };
+    }
+
+    /// Open a set whose main file holds the CWAL flag (database/cwal_set.zig).
+    fn openCwal(path: [:0]const u8, options: OpenOptions, registry: ExtensionRegistry, extension_mode: ExtensionOpenMode) Error!Database {
+        const conn = try cwal_set.open(path, options);
+        var raw = cwal_set.connection(conn);
+        var conn_open = true;
+        errdefer if (conn_open) cwal_set.close(conn, &raw);
+        if (cwal_set.isWriter(conn) and !try commit_protocol.sqliteFlagSet(&raw)) {
+            // A disable cleared the flag but stopped before checkpointing
+            // it. Finish it while no other handle has the set open, then
+            // open the set as a plain one.
+            if (cwal_set.disable(conn, &raw)) |_| {
+                conn_open = false;
+                cwal_set.close(conn, &raw);
+                return openInternal(path, options, true, registry, extension_mode);
+            } else |err| if (err != error.Busy) return err;
+        }
+
+        try enableForeignKeys(&raw);
+        try validateZovaSchema(&raw);
+        try @import("vector_maintenance.zig").register(&raw);
+        const bound_object_store: ?BoundObjectStore = if (try validateCwalBoundStore(&raw, .object)) .{} else null;
+        const bound_vector_store: ?BoundVectorStore = if (try validateCwalBoundStore(&raw, .vector)) .{} else null;
+        const bound_graph_store: ?BoundGraphStore = if (try validateCwalBoundStore(&raw, .graph)) .{} else null;
+        if (options.read_only) try raw.setQueryOnly(true);
+        try vector_sql.register(&raw);
+        try graph_sql.register(&raw);
+        switch (extension_mode) {
+            .enforce => {
+                try extension_impl.registerSqlForInstalled(&raw, registry);
+                try extension_impl.checkAll(&raw, registry);
+            },
+            .inspect => try extension_impl.validateInstalledRegistry(std.heap.c_allocator, &raw),
+        }
+        const notifications = try initNotifications(&raw);
+        errdefer deinitNotifications(notifications);
+        return .{
+            .sqlite_db = raw,
+            .notifications = notifications,
+            .bound_object_store = bound_object_store,
+            .bound_vector_store = bound_vector_store,
+            .bound_graph_store = bound_graph_store,
+            .extension_registry = registry,
+            .cwal_conn = conn,
+            .reopen = .{ .options = options, .extension_mode = extension_mode },
+        };
+    }
+
+    /// Schema names of a set's members, main first, in member order.
+    fn memberSchemas(buffer: *[4][:0]const u8, object: bool, vector: bool, graph: bool) []const [:0]const u8 {
+        var len: usize = 0;
+        buffer[len] = "main";
+        len += 1;
+        const bound = [_]struct { bool, [:0]const u8 }{
+            .{ object, bound_object_store_schema_name },
+            .{ vector, bound_vector_store_schema_name },
+            .{ graph, bound_graph_store_schema_name },
+        };
+        for (bound) |member| {
+            if (!member[0]) continue;
+            buffer[len] = member[1];
+            len += 1;
+        }
+        return buffer[0..len];
+    }
+
+    /// The commit protocol of the set this handle has open.
+    pub fn commitProtocol(self: *const Database) CommitProtocol {
+        return if (self.cwal_conn != null) .cwal else .none;
+    }
+
+    /// Experimental, in `-Dexperimental-cwal` builds only (otherwise
+    /// `UnsupportedZovaVersion`): switch the set this handle has open, main
+    /// and its bound stores, to `protocol`, then open it again through this
+    /// handle. Needs a read-write handle from `create` or `open`, outside a
+    /// transaction (`ObjectTransactionActive`), with none of the caller's
+    /// statements left open (`Misuse`), and no other handle on the set
+    /// (`Busy`). Every member must be in WAL mode (`Misuse`).
+    /// Settings of the old handle other than object compression are not
+    /// kept (notes/cwal-integration-260.md §7).
+    pub fn setCommitProtocol(self: *Database, protocol: CommitProtocol) Error!void {
+        if (!cwal_set.available) return error.UnsupportedZovaVersion;
+        if (protocol == self.commitProtocol()) return;
+        const reopen = self.reopen orelse return error.Misuse;
+        if (reopen.options.read_only) return error.ReadOnly;
+        if (sqlite.c.sqlite3_get_autocommit(self.sqlite_db.handle) == 0) return error.ObjectTransactionActive;
+        self.kv_statements.deinit();
+        self.kv_statements = .{};
+        self.idle_statements.deinit();
+        self.idle_statements = .{};
+        if (sqlite.c.sqlite3_next_stmt(self.sqlite_db.handle, null) != null) return error.Misuse;
+        const main_path = sqlite.c.sqlite3_db_filename(self.sqlite_db.handle, "main") orelse return error.Misuse;
+        const path = try std.heap.c_allocator.dupeSentinel(u8, std.mem.span(main_path), 0);
+        defer std.heap.c_allocator.free(path);
+
+        switch (protocol) {
+            .cwal => {
+                var schemas: [4][:0]const u8 = undefined;
+                const members = memberSchemas(&schemas, self.bound_object_store != null, self.bound_vector_store != null, self.bound_graph_store != null);
+                try cwal_set.enable(&self.sqlite_db, members);
+            },
+            .none => try cwal_set.disable(self.cwal_conn.?, &self.sqlite_db),
+        }
+        var next = openInternal(path, reopen.options, true, self.extension_registry, reopen.extension_mode) catch |err| {
+            // The set changed protocol, so this handle must not write it.
+            self.sqlite_db.setQueryOnly(true) catch {};
+            return err;
+        };
+        next.object_compression = self.object_compression;
+        _ = sqlite.c.sqlite3_db_config(self.sqlite_db.handle, sqlite.c.SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, @as(c_int, 1), @as(?*c_int, null));
+        self.deinit();
+        self.* = next;
     }
 
     /// Close the underlying SQLite connection.
@@ -1165,7 +1325,7 @@ pub const Database = struct {
         self.kv_statements.deinit();
         self.idle_statements.deinit();
         self.graph_walk_scratch.deinit();
-        self.sqlite_db.deinit();
+        if (self.cwal_conn) |conn| cwal_set.close(conn, &self.sqlite_db) else self.sqlite_db.deinit();
         deinitNotifications(self.notifications);
     }
 
@@ -2810,6 +2970,8 @@ pub const Database = struct {
 
     /// Bind, or safely replace, the external store of `kind`.
     fn bindStore(self: *Database, comptime kind: StoreKind, path: [:0]const u8) Error!void {
+        // A CWAL set changes members only while disabled (§7).
+        if (self.cwal_conn != null) return error.Misuse;
         const schema_name = comptime kind.schemaName();
         const bound = &@field(self, boundStoreField(kind));
 
@@ -2857,6 +3019,8 @@ pub const Database = struct {
 
     /// Move the single-file storage of `kind` into a new bound store.
     fn splitStore(self: *Database, comptime kind: StoreKind, store_path: [:0]const u8) Error!StoreStorage(kind).SplitResult {
+        // A CWAL set changes members only while disabled (§7).
+        if (self.cwal_conn != null) return error.Misuse;
         const storage = StoreStorage(kind);
         const schema_name = comptime kind.schemaName();
         const bound = &@field(self, boundStoreField(kind));
@@ -2915,6 +3079,8 @@ pub const Database = struct {
 
     /// Remove the binding of `kind`. Never deletes or mutates the store file.
     fn unbindStore(self: *Database, comptime kind: StoreKind) Error!void {
+        // A CWAL set changes members only while disabled (§7).
+        if (self.cwal_conn != null) return error.Misuse;
         try self.rejectBoundStoreManagementInsideMainTransaction();
         if (!try hasBoundStoreRow(&self.sqlite_db, kind)) return error.BoundStoreNotFound;
 
@@ -3365,6 +3531,8 @@ const mapSqliteResultCode = @import("database/metadata.zig").mapSqliteResultCode
 
 const validateZovaSchema = @import("database/validation.zig").validateZovaSchema;
 const commit_protocol = @import("database/commit_protocol.zig");
+const cwal_set = @import("database/cwal_set.zig");
+const validateCwalBoundStore = @import("database/bound_stores.zig").validateCwalBoundStore;
 
 const validateExtensionLifecycleCore = @import("database/validation.zig").validateExtensionLifecycleCore;
 
@@ -3409,5 +3577,6 @@ comptime {
         _ = @import("database_journal_tests.zig");
         _ = @import("database_read_consistency_tests.zig");
         _ = @import("database_commit_protocol_tests.zig");
+        _ = @import("database_cwal_set_tests.zig");
     }
 }

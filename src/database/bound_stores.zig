@@ -98,7 +98,34 @@ pub fn openConfiguredBoundStore(db: *sqlite.Database, comptime kind: StoreKind, 
 
     try attachStore(db, kind, path_z, options.read_only);
     errdefer db.detachDatabase(kind.schemaName()) catch {};
+    try validateAttachedRow(db, kind, row);
+    return true;
+}
 
+/// Validate the store a CWAL handle attached for `kind` (cwal_set.zig) while
+/// it opened the set from main's member list. Returns false when main has no
+/// binding of that kind. The binding row must exist exactly when the schema
+/// is attached, and name the attached file.
+pub fn validateCwalBoundStore(db: *sqlite.Database, comptime kind: StoreKind) Error!bool {
+    const attached = sqlite.c.sqlite3_db_filename(db.handle, comptime kind.schemaName() ++ "");
+    var row = (try loadBoundStoreRow(std.heap.c_allocator, db, kind)) orelse {
+        if (attached != null) return error.BoundStoreInvalid;
+        return false;
+    };
+    defer row.deinit(std.heap.c_allocator);
+    const attached_path = std.mem.span(attached orelse return error.BoundStoreInvalid);
+
+    const path_z = try std.heap.c_allocator.dupeSentinel(u8, row.path, 0);
+    defer std.heap.c_allocator.free(path_z);
+    var resolved_buffer: [std.c.PATH_MAX]u8 = undefined;
+    const resolved = std.c.realpath(path_z.ptr, &resolved_buffer) orelse return error.BoundStoreInvalid;
+    if (!std.mem.eql(u8, std.mem.span(resolved), attached_path)) return error.BoundStoreInvalid;
+
+    try validateAttachedRow(db, kind, row);
+    return true;
+}
+
+fn validateAttachedRow(db: *sqlite.Database, comptime kind: StoreKind, row: BoundStoreRow) Error!void {
     const actual_store_id = try kind.validateAttachedAlloc(std.heap.c_allocator, db);
     defer std.heap.c_allocator.free(actual_store_id);
     if (!std.mem.eql(u8, actual_store_id, row.store_id)) return error.BoundStoreInvalid;
@@ -109,7 +136,6 @@ pub fn openConfiguredBoundStore(db: *sqlite.Database, comptime kind: StoreKind, 
 
     const actual_epoch = try attachedMetadataU64(db, kind.schemaName(), kind.epochKey());
     if (actual_epoch != row.epoch) return error.BoundStoreInvalid;
-    return true;
 }
 
 pub fn attachStore(db: *sqlite.Database, comptime kind: StoreKind, path: []const u8, read_only: bool) Error!void {

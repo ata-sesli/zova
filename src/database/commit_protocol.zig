@@ -85,6 +85,29 @@ pub fn refuseSqliteFlag(db: *sqlite.Database) Error!void {
     return error.UnsupportedZovaVersion;
 }
 
+/// Whether main's `application_id`, as SQLite sees it (including a value
+/// still only in the WAL), is the CWAL flag.
+pub fn sqliteFlagSet(db: *sqlite.Database) Error!bool {
+    const value = readApplicationId(db) catch |err| switch (err) {
+        error.SqliteError => return error.NotZovaDatabase,
+        else => return err,
+    };
+    return value == application_id;
+}
+
+/// Remove what an enable that never committed its flag, or a disable that
+/// committed it, left on a plain set: every member's marker table, then
+/// main's key (decision 9 keeps "no marker table without the key").
+/// `schemas` are the attached members, main first.
+pub fn removeLeftovers(db: *sqlite.Database, schemas: []const [:0]const u8) Error!void {
+    for (schemas) |schema| {
+        var buffer: [96]u8 = undefined;
+        const sql = std.fmt.bufPrintSentinel(&buffer, "drop table if exists {s}." ++ marker_table, .{schema}, 0) catch return error.Misuse;
+        try db.exec(sql);
+    }
+    try db.exec("delete from main._zova_meta where key = '" ++ meta_key ++ "'");
+}
+
 fn readApplicationId(db: *sqlite.Database) Error!i64 {
     var stmt = try db.prepare("pragma main.application_id");
     defer stmt.deinit();

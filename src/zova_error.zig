@@ -57,5 +57,14 @@ pub const Error = sqlite.Error || error{
     ExtensionLoadFailed,
     KvTooLarge,
     KvCorrupt,
+    /// A member of a cross-file commit set (experimental CWAL) is open as a
+    /// member of another set.
+    MemberOwned,
+    /// A CWAL set handle crashed inside a cross-file commit while other
+    /// handles had the set open. Close every handle of the set and reopen.
+    CommitSetBroken,
+    /// A CWAL set cannot be opened or repaired safely, for example because a
+    /// connection outside the protocol checkpointed an interrupted commit.
+    CommitSetNeedsRepair,
     OutOfMemory,
 };

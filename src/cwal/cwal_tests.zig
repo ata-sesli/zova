@@ -137,8 +137,8 @@ test "a set of max_members commits across every member; one more is refused" {
     }
     try conn.commit();
     const full_mask: i64 = (1 << cwal.max_members) - 1;
-    try std.testing.expectEqual(full_mask, try count(conn, "select mask from main.cwal_marker where k = 0"));
-    try std.testing.expectEqual(full_mask, try count(conn, "select mask from m30.cwal_marker where k = 0"));
+    try std.testing.expectEqual(full_mask, try count(conn, "select mask from main._zova_cwal_marker where k = 0"));
+    try std.testing.expectEqual(full_mask, try count(conn, "select mask from m30._zova_cwal_marker where k = 0"));
     conn.close();
 
     cwal.last_recovery = "none";
@@ -172,9 +172,9 @@ test "a cross-file commit writes both members and their markers" {
     try std.testing.expectEqual(@as(i64, 2), try count(conn, "select count(*) from m1.t"));
     // Both members carry the newest cross-file transaction's marker. The
     // low 32 bits count transactions; the high bits hold the writer epoch.
-    try std.testing.expectEqual(@as(i64, 2), try count(conn, "select txn & 4294967295 from main.cwal_marker where k = 0"));
-    try std.testing.expectEqual(@as(i64, 2), try count(conn, "select txn & 4294967295 from m1.cwal_marker where k = 0"));
-    try std.testing.expectEqual(@as(i64, 3), try count(conn, "select mask from m1.cwal_marker where k = 0"));
+    try std.testing.expectEqual(@as(i64, 2), try count(conn, "select txn & 4294967295 from main._zova_cwal_marker where k = 0"));
+    try std.testing.expectEqual(@as(i64, 2), try count(conn, "select txn & 4294967295 from m1._zova_cwal_marker where k = 0"));
+    try std.testing.expectEqual(@as(i64, 3), try count(conn, "select mask from m1._zova_cwal_marker where k = 0"));
     conn.close();
 
     // A later open sees everything and runs no recovery.
@@ -251,7 +251,7 @@ test "recovery rolls back a cross-file commit that reached only one member" {
     try std.testing.expectEqualStrings("rollback", cwal.last_recovery);
     try std.testing.expectEqual(@as(i64, 1), try count(conn, "select count(*) from main.t"));
     try std.testing.expectEqual(@as(i64, 1), try count(conn, "select count(*) from m1.t"));
-    try std.testing.expectEqual(@as(i64, 1), try count(conn, "select txn & 4294967295 from main.cwal_marker where k = 0"));
+    try std.testing.expectEqual(@as(i64, 1), try count(conn, "select txn & 4294967295 from main._zova_cwal_marker where k = 0"));
     // The set accepts new cross-file commits after the repair.
     try crossCommit(conn, 3);
     try std.testing.expectEqual(@as(i64, 2), try count(conn, "select count(*) from m1.t"));
@@ -305,7 +305,7 @@ fn partialCheckpointImage(tmp: *std.testing.TmpDir, image: *Paths, checkpoint_fi
         defer conn.close();
         try crossCommit(conn, 1);
         t_root = try rootPage(conn, "t");
-        try std.testing.expect(t_root != try rootPage(conn, "cwal_marker"));
+        try std.testing.expect(t_root != try rootPage(conn, "_zova_cwal_marker"));
         if (checkpoint_first) try conn.exec("pragma main.wal_checkpoint(TRUNCATE)");
         try copyFile(s1_path, image_s1);
         try copyFile(try std.fmt.bufPrint(&buf[0], "{s}-wal", .{s1_path}), try std.fmt.bufPrint(&buf[1], "{s}-wal", .{image_s1}));

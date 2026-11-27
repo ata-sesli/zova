@@ -7,6 +7,7 @@ const sqlite = @import("sqlite.zig");
 const testingDbPath = @import("zova_test_support.zig").testingDbPath;
 
 const Database = zova.Database;
+const cwal_available = @import("database/cwal_set.zig").available;
 
 fn readFileAlloc(path: []const u8) ![]u8 {
     const io = std.Io.Threaded.global_single_threaded.io();
@@ -158,8 +159,11 @@ test "a CWAL set is refused before SQLite opens it, and its files stay unchanged
     const wal_before = try readFileAlloc(wal_path);
     defer std.testing.allocator.free(wal_before);
 
-    try std.testing.expectError(error.UnsupportedZovaVersion, Database.open(main_path));
-    try std.testing.expectError(error.UnsupportedZovaVersion, Database.openWithOptions(main_path, .{ .read_only = true }));
+    // A CWAL build opens the set (database_cwal_set_tests.zig).
+    if (!cwal_available) {
+        try std.testing.expectError(error.UnsupportedZovaVersion, Database.open(main_path));
+        try std.testing.expectError(error.UnsupportedZovaVersion, Database.openWithOptions(main_path, .{ .read_only = true }));
+    }
     try std.testing.expectError(error.UnsupportedZovaVersion, zova.openForLogicalInspection(main_path));
     try std.testing.expectError(error.UnsupportedZovaVersion, zova.migrateDatabase(main_path, dest_path, .{}));
     try std.testing.expect(!fileExists(dest_path));
@@ -197,7 +201,13 @@ test "a CWAL flag still only in the WAL is refused without a checkpoint" {
     const wal_before = try readFileAlloc(wal_path);
     defer std.testing.allocator.free(wal_before);
 
-    try std.testing.expectError(error.UnsupportedZovaVersion, Database.open(main_path));
+    // A CWAL build's writer finishes the enable (database_cwal_set_tests.zig).
+    // A CWAL build's reader asks for a read-write open first.
+    if (!cwal_available) try std.testing.expectError(error.UnsupportedZovaVersion, Database.open(main_path));
+    try std.testing.expectError(
+        if (cwal_available) error.CommitSetNeedsRepair else error.UnsupportedZovaVersion,
+        Database.openWithOptions(main_path, .{ .read_only = true }),
+    );
     try std.testing.expectError(error.UnsupportedZovaVersion, zova.openForLogicalInspection(main_path));
 
     const main_after = try readFileAlloc(main_path);

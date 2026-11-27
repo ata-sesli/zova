@@ -338,7 +338,8 @@ Reconciling at open:
   and its checkpoint. The open runs the CWAL path, including recovery,
   then finishes the checkpoint and the rest of the disable.
 - **Raw flag set, a member without its marker table.** Cannot happen by
-  construction. The open refuses with `ProtocolViolation`.
+  construction. The open refuses with `ProtocolViolation`
+  (`CommitSetNeedsRepair` in Zova).
 
 A crash test must kill each transition at every step and check that the
 next open lands in one of these rows.
@@ -546,8 +547,10 @@ Each phase lands with its tests. Nothing ships outside
      recovery ordering (§3, §7, §8).
    - Enable and disable calls.
 
-**Phase 3 status (2026-11-27).** The format-15 storage contract is in
-place; the CWAL open path and the transitions are not.
+**Phase 3 status (2026-11-27).** The format-15 storage contract, the CWAL
+open path and the transitions are in place in `-Dexperimental-cwal`
+builds, uncommitted. Cross-file transactions (phase 4) and maintenance
+(phase 5) are not.
 
 - Retained format-14 fixtures, produced before format 15 was activated with
   the CLI built from the unmodified `v1.5.0` tag (`5d760d4`, `zova 1.5.0`,
@@ -601,7 +604,69 @@ place; the CWAL open path and the transitions are not.
   `UnsupportedZovaVersion` in every build, including
   `-Dexperimental-cwal`, until the open path lands, and the refused
   connection is set not to checkpoint on close. `UnsupportedZovaVersion`
-  is the decided refusal code (decision 9).
+  is the decided refusal code (decision 9). Builds without CWAL keep this
+  refusal; `-Dexperimental-cwal` builds now open the set (below), while
+  logical inspection and migration still refuse it.
+- Open path (`src/database/cwal_set.zig`, `Database.openInternal`):
+  - The member list is read from main's `_zova_bound_stores` through an
+    `immutable=1` connection before CWAL takes any lock. That connection
+    neither takes a lock nor reads or maps `-wal` and `-shm`, so it
+    cannot disturb the heads CWAL captures. It sees only checkpointed
+    content, which is enough because membership changes only while the
+    set is disabled and fully checkpointed (bind, unbind and split return
+    `Misuse` on a CWAL handle). After SQLite opens, each attached store
+    must match its binding row (path, store id, set id, epoch), so a stale
+    list fails with `BoundStoreInvalid`. This replaces the §7 proposal of
+    reading the list through the recovery connection under `-gate`.
+  - `Conn.open` takes the members (`-cwal-own`), the gate and `-alive`,
+    runs recovery when alone, then attaches the stores under their usual
+    schema names (`Options.schemas`). With `require_markers` a member
+    without its marker table is refused (`ProtocolViolation`, mapped to
+    `CommitSetNeedsRepair`) instead of the table being created.
+  - A read-write open is the set's writer; a second one gets `Busy`. A
+    read-only open is a reader and also sets `query_only`.
+  - Errors map as `Broken` → `CommitSetBroken`, `ProtocolViolation` →
+    `CommitSetNeedsRepair`, `MemberOwned` → `MemberOwned`, `WriterBusy` →
+    `Busy`, `Io` → `CantOpen`, `Sqlite` → `SqliteError`. The C ABI keeps
+    the generic codes for the new errors until phase 6.
+  - A writer that joins a set left torn by a dead writer is refused with
+    `Broken` (`markersReadable`), so a writer handle always has a
+    consistent set: disable's checkpoints need no extra recovery step.
+- Transitions: `Database.setCommitProtocol(.cwal | .none)`, experimental
+  only (`UnsupportedZovaVersion` otherwise), on a read-write handle from
+  `create` or `open`, outside a transaction, with no caller statements
+  open (`ObjectTransactionActive` inside a transaction, as
+  `setJournalMode`; `Misuse` with caller statements open). Enable needs
+  every member in WAL mode (`Misuse`) and no
+  other connection on the set (`Busy`); disable needs no other handle on
+  the set (`Busy`). On success the handle reopens the set in the new mode.
+  - Enable switches the connection to exclusive locking mode before its
+    first write transaction, so it fails while any other connection has a
+    member open and keeps every plain opener out until it ends. Then: the
+    key, each member's marker table, a TRUNCATE checkpoint of every
+    member, `application_id`, and a TRUNCATE checkpoint of main.
+  - Disable holds `-alive` exclusively, checkpoints every member, clears
+    `application_id`, checkpoints main, drops every marker table, then
+    clears the key.
+  - Reconciling at open follows §7: a read-write open finishes an enable
+    whose flag is only in the WAL and a disable whose cleared flag is only
+    in the WAL (the latter only while no other handle is open; otherwise
+    it opens as CWAL). A read-write plain open removes leftover marker
+    tables, then the key. A read-only open of a set whose flag is only in
+    the WAL is refused with `CommitSetNeedsRepair` and writes nothing; a
+    read-write open repairs it (decision 10).
+- Tests (`src/database_cwal_set_tests.zig`, skipped without the flag): a
+  bound set enables, takes one writer and readers, refuses a second writer,
+  a membership change and a shared disable, and disables with its data; enable is
+  refused while another handle is open and without WAL mode; a flagged set
+  without marker tables needs repair; a test-only stop after every enable
+  and disable step leaves a state the next open completes or undoes. The
+  stop sets the connection not to checkpoint on close; real kills and
+  power loss are phase 7.
+- Known gaps: an extension's temporary authorizer replaces CWAL's while it
+  runs (phase 4); a transaction that writes two members is refused by the
+  commit hook (phase 4); maintenance operations are unchecked (phase 5);
+  the foreign-checkpoint test for the member-list read is phase 7.
 4. **Transactions.** Commit and read interception (§4) and the authorizer
    layer (§5).
 5. **Maintenance.** The §6 table, one operation at a time.
@@ -614,6 +679,9 @@ place; the CWAL open path and the transitions are not.
      N-file sections, plus the mutation sweep.
    - Close T1. Rerun the T2/T3 sections on the integrated build. Run the
      12–24 h endurance runs (T4).
+   - A foreign checkpoint of main, and of a store, while a CWAL open reads
+     the member list with `immutable=1` (decision 10). That test is what
+     shows the read is harmless.
 
 ## 12. Decisions (approved 2026-11-26)
 
@@ -659,6 +727,21 @@ place; the CWAL open path and the transitions are not.
    - Format 15 ships with package version 1.6.0. Until the release bump,
      current-version prose pairs the unreleased tree's format 15 with
      version 1.5.0; `scripts/bump-version.sh` rewrites the version.
+10. **Open path** (2026-11-27).
+    - A second read-write open of a CWAL set returns `Busy`; read-only
+      opens (readers) are unlimited.
+    - `setCommitProtocol` inside a caller's transaction returns
+      `ObjectTransactionActive`, as `setJournalMode` does. Caller
+      statements left open, and bind, unbind or split on a CWAL handle,
+      return `Misuse`.
+    - The member list is read from main with `immutable=1` before CWAL
+      takes any lock (§11, phase 3). The phase 7 foreign-checkpoint test
+      must show it is harmless.
+    - A read-only open of a set whose flag is only in main's WAL (an
+      enable stopped past its commit point) is refused with
+      `CommitSetNeedsRepair`.
+    - A CWAL handle keeps CWAL's 10 s busy timeout when `busy_timeout_ms`
+      is 0.
 
 Scope now: T2 and T3 only, closed with implementation and test evidence in
 the prototype before the broader integration starts. T1, T4 and T5 stay

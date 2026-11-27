@@ -31,6 +31,10 @@ fn bufPrintZ(buf: []u8, comptime fmt: []const u8, args: anytype) std.fmt.BufPrin
 }
 
 pub const max_members = 31;
+
+/// Every member's marker table, in Zova's private `_zova_` namespace. Row 0
+/// holds `(txn, mask)` in every member; row 1 holds main's writer epoch.
+pub const marker_table = "_zova_cwal_marker";
 const shm_region_size = 32768;
 
 // SQLite WAL constants (sqlite3.c: WAL_WRITE_LOCK, WAL_CKPT_LOCK, WAL_HDRSIZE,
@@ -1209,7 +1213,7 @@ fn tornPageCheckpointed(db: ?*c.sqlite3, path: [:0]const u8, wal_fd: c_int, star
 fn markerOf(db: ?*c.sqlite3) Error!Marker {
     var stmt: ?*c.sqlite3_stmt = null;
     // No table yet: no cross-file commit has happened.
-    if (c.sqlite3_prepare_v2(db, "select txn, mask, (select rootpage from sqlite_schema where name = 'cwal_marker') from cwal_marker where k = 0", -1, &stmt, null) != c.SQLITE_OK) return .{};
+    if (c.sqlite3_prepare_v2(db, "select txn, mask, (select rootpage from sqlite_schema where name = '" ++ marker_table ++ "') from " ++ marker_table ++ " where k = 0", -1, &stmt, null) != c.SQLITE_OK) return .{};
     defer _ = c.sqlite3_finalize(stmt);
     return switch (c.sqlite3_step(stmt)) {
         c.SQLITE_ROW => .{ .txn = @intCast(c.sqlite3_column_int64(stmt, 0)), .mask = @intCast(c.sqlite3_column_int64(stmt, 1)), .root = @intCast(c.sqlite3_column_int64(stmt, 2)) },
@@ -1253,6 +1257,13 @@ pub const Options = struct {
     synchronous: [:0]const u8 = "FULL",
     cache_pages: i32 = 0,
     busy_timeout_ms: c_int = 10_000,
+    /// Schema name of each member, `paths.len` of them, the first `main`.
+    /// They must outlive the handle. Default: `main`, `m1`, `m2`, ....
+    schemas: ?[]const [:0]const u8 = null,
+    /// Refuse a set whose members do not all have a marker table already
+    /// (`ProtocolViolation`) instead of creating them: a Zova set creates
+    /// them when it enables the protocol.
+    require_markers: bool = false,
 };
 
 var registry: [256]?*Conn = @splat(null);
@@ -1307,6 +1318,8 @@ pub const Conn = struct {
     db: ?*c.sqlite3 = null,
     nmembers: u32,
     paths: [max_members][:0]u8 = undefined,
+    /// Each member's schema name on `db` (`Options.schemas`).
+    schemas: [max_members][:0]const u8 = schema_names,
     member_db: [max_members]?*File = @splat(null),
     write_locked: [max_members]bool = @splat(false),
     alive_fd: c_int = -1,
@@ -1368,8 +1381,12 @@ pub const Conn = struct {
         // One connection attaches every member but main, within SQLite's
         // SQLITE_MAX_ATTACHED (30 in Zova's native builds).
         if (paths.len == 0 or paths.len > max_members) return error.ProtocolViolation;
+        if (options.schemas) |names| {
+            if (names.len != paths.len or !std.mem.eql(u8, names[0], "main")) return error.ProtocolViolation;
+        }
         const conn = allocator.create(Conn) catch return error.Io;
         conn.* = .{ .id = 0, .mode = options.mode, .role = options.role, .nmembers = @intCast(paths.len) };
+        if (options.schemas) |names| @memcpy(conn.schemas[0..names.len], names);
         for (paths, 0..) |p, i| conn.paths[i] = fullPath(p) catch {
             for (conn.paths[0..i]) |q| allocator.free(q);
             allocator.destroy(conn);
@@ -1408,6 +1425,13 @@ pub const Conn = struct {
             try conn.recoverAlone();
             try conn.openSqlite(paths, options);
         }
+        if (options.mode == .cwal and options.require_markers) {
+            for (0..paths.len) |i| {
+                var sql_buf: [160]u8 = undefined;
+                const q = bufPrintZ(&sql_buf, "select count(*) from {s}.sqlite_schema where type = 'table' and name = '" ++ marker_table ++ "'", .{conn.schemas[i]}) catch return error.Io;
+                if (try conn.queryU64(q) == 0) return error.ProtocolViolation;
+            }
+        }
         if (options.mode == .cwal) {
             _ = c.sqlite3_commit_hook(conn.db, &commitHook, conn);
             _ = c.sqlite3_rollback_hook(conn.db, &rollbackHook, conn);
@@ -1417,10 +1441,10 @@ pub const Conn = struct {
                 // One single-member commit per statement.
                 for (0..paths.len) |i| {
                     var sql_buf: [160]u8 = undefined;
-                    const schema = schemaName(i);
-                    try conn.exec(bufPrintZ(&sql_buf, "create table if not exists {s}.cwal_marker(k integer primary key, txn integer not null, mask integer not null)", .{schema}) catch return error.Io);
-                    try conn.exec(bufPrintZ(&sql_buf, "insert or ignore into {s}.cwal_marker values (0, 0, 0)", .{schema}) catch return error.Io);
-                    const q = bufPrintZ(&sql_buf, "select txn from {s}.cwal_marker where k = 0", .{schema}) catch return error.Io;
+                    const schema = conn.schemas[i];
+                    try conn.exec(bufPrintZ(&sql_buf, "create table if not exists {s}." ++ marker_table ++ "(k integer primary key, txn integer not null, mask integer not null)", .{schema}) catch return error.Io);
+                    try conn.exec(bufPrintZ(&sql_buf, "insert or ignore into {s}." ++ marker_table ++ " values (0, 0, 0)", .{schema}) catch return error.Io);
+                    const q = bufPrintZ(&sql_buf, "select txn from {s}." ++ marker_table ++ " where k = 0", .{schema}) catch return error.Io;
                     conn.txn = @max(conn.txn, try conn.queryU64(q));
                 }
                 if (!fault.mutated("no-txn-epoch")) {
@@ -1430,11 +1454,11 @@ pub const Conn = struct {
                     // durably, before it numbers anything, and numbers its
                     // transactions epoch << 32 | 1, 2, .... The epoch is in
                     // main's marker table, row 1.
-                    try conn.exec("insert or ignore into main.cwal_marker values (1, 0, 0)");
-                    const stored = try conn.queryU64("select txn from main.cwal_marker where k = 1");
+                    try conn.exec("insert or ignore into main." ++ marker_table ++ " values (1, 0, 0)");
+                    const stored = try conn.queryU64("select txn from main." ++ marker_table ++ " where k = 1");
                     const epoch = @max(stored, conn.txn >> 32) + 1;
                     var sql_buf: [96]u8 = undefined;
-                    try conn.exec(bufPrintZ(&sql_buf, "update main.cwal_marker set txn = {d} where k = 1", .{epoch}) catch return error.Io);
+                    try conn.exec(bufPrintZ(&sql_buf, "update main." ++ marker_table ++ " set txn = {d} where k = 1", .{epoch}) catch return error.Io);
                     conn.txn = epoch << 32;
                 }
             }
@@ -1470,7 +1494,7 @@ pub const Conn = struct {
     }
 
     fn isMarker(name: [*c]const u8) bool {
-        return isName(name, "cwal_marker");
+        return isName(name, marker_table);
     }
 
     /// After openSqlite, while the gate is held: whether no other handle has
@@ -1499,12 +1523,12 @@ pub const Conn = struct {
         _ = c.sqlite3_busy_timeout(db, options.busy_timeout_ms);
         for (1..paths.len) |i| {
             var sql_buf: [1200]u8 = undefined;
-            const sql = bufPrintZ(&sql_buf, "attach 'file:{s}?cwal={d}&cwm={d}' as m{d}", .{ conn.paths[i], id, i, i }) catch return error.Io;
+            const sql = bufPrintZ(&sql_buf, "attach 'file:{s}?cwal={d}&cwm={d}' as {s}", .{ conn.paths[i], id, i, conn.schemas[i] }) catch return error.Io;
             try conn.exec(sql);
         }
         for (0..paths.len) |i| {
             var sql_buf: [128]u8 = undefined;
-            const schema = schemaName(i);
+            const schema = conn.schemas[i];
             try conn.exec(bufPrintZ(&sql_buf, "pragma {s}.synchronous={s}", .{ schema, options.synchronous }) catch return error.Io);
             if (options.cache_pages != 0) try conn.exec(bufPrintZ(&sql_buf, "pragma {s}.cache_size={d}", .{ schema, options.cache_pages }) catch return error.Io);
         }
@@ -1515,7 +1539,7 @@ pub const Conn = struct {
             // open in another mode.
             for (0..paths.len) |i| {
                 var sql_buf: [64]u8 = undefined;
-                const sql = bufPrintZ(&sql_buf, "pragma {s}.journal_mode=wal", .{schemaName(i)}) catch return error.Io;
+                const sql = bufPrintZ(&sql_buf, "pragma {s}.journal_mode=wal", .{conn.schemas[i]}) catch return error.Io;
                 if (!try conn.queryIs(sql, "wal")) {
                     conn.log("member {d} is not in WAL mode", .{i});
                     return error.ProtocolViolation;
@@ -1525,7 +1549,7 @@ pub const Conn = struct {
             // sqlite3_snapshot_open requires) and its wal-index mapped.
             for (0..paths.len) |i| {
                 var sql_buf: [96]u8 = undefined;
-                try conn.exec(bufPrintZ(&sql_buf, "select count(*) from {s}.sqlite_schema", .{schemaName(i)}) catch return error.Io);
+                try conn.exec(bufPrintZ(&sql_buf, "select count(*) from {s}.sqlite_schema", .{conn.schemas[i]}) catch return error.Io);
             }
         }
     }
@@ -1551,6 +1575,35 @@ pub const Conn = struct {
     /// Number the next cross-file transaction's commit markers will carry.
     pub fn nextTxn(conn: *const Conn) u64 {
         return conn.txn + 1;
+    }
+
+    /// Take `-alive` exclusively if no other handle has the set open, and
+    /// keep it until `releaseAlone`: openers then wait at their `-alive`
+    /// check. False, with nothing changed, when another handle has the set
+    /// open. Runs under the gate, because a flock(2) conversion drops the
+    /// old lock first and only gate holders may take `-alive` exclusively.
+    pub fn holdAlone(conn: *Conn) Error!bool {
+        if (conn.mode != .cwal) return error.ProtocolViolation;
+        if (!lock(conn.gate_fd, sys.LOCK_EX)) return error.Io;
+        defer _ = sys.flock(conn.gate_fd, sys.LOCK_UN);
+        if (lock(conn.alive_fd, sys.LOCK_EX | sys.LOCK_NB)) return true;
+        if (!lock(conn.alive_fd, sys.LOCK_SH)) return error.Io;
+        return false;
+    }
+
+    /// Share `-alive` again after `holdAlone`.
+    pub fn releaseAlone(conn: *Conn) Error!void {
+        if (!lock(conn.gate_fd, sys.LOCK_EX)) return error.Io;
+        defer _ = sys.flock(conn.gate_fd, sys.LOCK_UN);
+        if (!lock(conn.alive_fd, sys.LOCK_SH)) return error.Io;
+    }
+
+    /// Run `sql` with the authorizer's marker-table checks suspended, for a
+    /// caller that maintains the marker tables itself (disabling CWAL).
+    pub fn execInternal(conn: *Conn, sql: [:0]const u8) Error!void {
+        conn.internal = true;
+        defer conn.internal = false;
+        try conn.exec(sql);
     }
 
     pub fn close(conn: *Conn) void {
@@ -2163,7 +2216,7 @@ pub const Conn = struct {
                 for (0..conn.nmembers) |m| {
                     if (mask & (@as(u32, 1) << @intCast(m)) == 0) continue;
                     var buf: [128]u8 = undefined;
-                    try conn.exec(bufPrintZ(&buf, "update {s}.cwal_marker set txn = {d}, mask = {d} where k = 0", .{ schemaName(m), t, mask }) catch return error.Io);
+                    try conn.exec(bufPrintZ(&buf, "update {s}." ++ marker_table ++ " set txn = {d}, mask = {d} where k = 0", .{ conn.schemas[m], t, mask }) catch return error.Io);
                 }
                 conn.marker_pending = true;
                 defer conn.marker_pending = false;
@@ -2212,7 +2265,7 @@ pub const Conn = struct {
         for (0..conn.nmembers) |i| {
             if (i != 0 and gap_us != 0) _ = sys.usleep(gap_us);
             var buf: [96]u8 = undefined;
-            const sql = bufPrintZ(&buf, "select count(*) from {s}.sqlite_schema", .{schemaName(i)}) catch return error.Io;
+            const sql = bufPrintZ(&buf, "select count(*) from {s}.sqlite_schema", .{conn.schemas[i]}) catch return error.Io;
             conn.exec(sql) catch |err| {
                 conn.exec("rollback") catch {};
                 return err;
@@ -2314,7 +2367,7 @@ pub const Conn = struct {
             for (0..conn.nmembers) |m| {
                 if (m != 0 and gap_us != 0) _ = sys.usleep(gap_us);
                 var snapshot: c.sqlite3_snapshot = .{ .hidden = hdrs[m] };
-                if (c.sqlite3_snapshot_open(conn.db, schemaName(m).ptr, &snapshot) != c.SQLITE_OK) {
+                if (c.sqlite3_snapshot_open(conn.db, conn.schemas[m].ptr, &snapshot) != c.SQLITE_OK) {
                     opened = false;
                     break;
                 }

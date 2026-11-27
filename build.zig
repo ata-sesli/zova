@@ -53,6 +53,21 @@ pub fn build(b: *std.Build) void {
     zova_build_options.addOption(bool, "enable_dynamic_extensions", enable_dynamic_extensions);
     const experimental_cwal = b.option(bool, "experimental-cwal", "Enable the experimental cross-file commit protocol (CWAL)") orelse false;
     zova_build_options.addOption(bool, "experimental_cwal", experimental_cwal);
+    // Experimental CWAL (POSIX only): with the option on, every module that
+    // compiles the Zova sources also gets CWAL's POSIX bindings and its
+    // production options (no test hooks); see addZovaBuildOptions.
+    if (experimental_cwal) {
+        const cwal_options = b.addOptions();
+        cwal_options.addOption(bool, "test_hooks", false);
+        cwal_modules = .{
+            .sys = b.addTranslateC(.{
+                .root_source_file = b.path("src/cwal/sys.h"),
+                .target = target,
+                .optimize = optimize,
+            }).createModule(),
+            .options = cwal_options,
+        };
+    }
 
     _ = b.addTranslateC(.{
         .root_source_file = b.path("vendor/sqlite3.53.4/sqlite3.h"),
@@ -81,7 +96,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    zova_module.addOptions("zova_build_options", zova_build_options);
+    addZovaBuildOptions(zova_module, zova_build_options);
     addSqlite(zova_module, b, sqlite_lib);
 
     const zova_dynamic_module = b.createModule(.{
@@ -89,7 +104,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    zova_dynamic_module.addOptions("zova_build_options", zova_build_options);
+    addZovaBuildOptions(zova_dynamic_module, zova_build_options);
     zova_dynamic_module.addImport("sqlite_c", b.modules.get("sqlite_c").?);
     zova_dynamic_module.addIncludePath(b.path("vendor/sqlite3.53.4"));
 
@@ -542,7 +557,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    walk_module.addOptions("zova_build_options", zova_build_options);
+    addZovaBuildOptions(walk_module, zova_build_options);
     addSqlite(walk_module, b, sqlite_lib);
     walk_benchmark.root_module.addImport("zova", walk_module);
     const install_walk_benchmark = b.addInstallArtifact(walk_benchmark, .{});
@@ -640,7 +655,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    ablation_api_module.addOptions("zova_build_options", zova_build_options);
+    addZovaBuildOptions(ablation_api_module, zova_build_options);
     addSqlite(ablation_api_module, b, sqlite_lib);
     const fresh_ablation_benchmark = b.addExecutable(.{
         .name = "zova_fresh_build_ablation",
@@ -660,7 +675,7 @@ pub fn build(b: *std.Build) void {
         .name = "zova_vector_maintenance_benchmark",
         .root_module = b.createModule(.{ .root_source_file = b.path("src/vector_maintenance_benchmark.zig"), .target = target, .optimize = optimize }),
     });
-    maintenance_benchmark.root_module.addOptions("zova_build_options", zova_build_options);
+    addZovaBuildOptions(maintenance_benchmark.root_module, zova_build_options);
     addSqlite(maintenance_benchmark.root_module, b, sqlite_lib);
     const maintenance_cmd = b.addRunArtifact(maintenance_benchmark);
     maintenance_cmd.addPassthruArgs();
@@ -674,7 +689,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    storage_compat_check.root_module.addOptions("zova_build_options", zova_build_options);
+    addZovaBuildOptions(storage_compat_check.root_module, zova_build_options);
     addSqlite(storage_compat_check.root_module, b, sqlite_lib);
     const storage_compat_check_cmd = b.addRunArtifact(storage_compat_check);
     const storage_compat_check_step = b.step("check-storage-compat", "Verify the storage compatibility policy against the retained fixtures");
@@ -815,7 +830,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    plugin_test_module.addOptions("zova_build_options", zova_build_options);
+    addZovaBuildOptions(plugin_test_module, zova_build_options);
     plugin_test_module.addOptions("plugin_fixture_options", plugin_fixture_options);
     addSqlite(plugin_test_module, b, sqlite_lib);
     const plugin_tests = b.addTest(.{ .name = "plugin-abi", .root_module = plugin_test_module, .filters = &.{"extension_plugin"} });
@@ -851,7 +866,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    crash_module.addOptions("zova_build_options", zova_build_options);
+    addZovaBuildOptions(crash_module, zova_build_options);
     addSqlite(crash_module, b, sqlite_lib);
     const crash_driver = b.addExecutable(.{ .name = "migration-crash-driver", .root_module = crash_module });
     const crash_tests = b.addSystemCommand(&.{ if (@import("builtin").os.tag == .windows) "python" else "python3", "scripts/test-migration-recovery.py" });
@@ -872,14 +887,10 @@ pub fn build(b: *std.Build) void {
         c_api_test_step,
     }) |suite_step| test_step.dependOn(suite_step);
 
-    // Experimental CWAL (POSIX only). Not reachable from the Zova module yet;
-    // its tests run once without and once with the test hooks compiled in.
-    if (experimental_cwal) {
-        const cwal_sys = b.addTranslateC(.{
-            .root_source_file = b.path("src/cwal/sys.h"),
-            .target = target,
-            .optimize = optimize,
-        }).createModule();
+    // Experimental CWAL tests run once without and once with the test hooks
+    // compiled in.
+    if (cwal_modules) |cwal| {
+        const cwal_sys = cwal.sys;
         const cwal_test_step = b.step("test-cwal", "Run experimental CWAL tests (with -Dexperimental-cwal)");
         for ([_]bool{ false, true }) |test_hooks| {
             const cwal_options = b.addOptions();
@@ -967,7 +978,7 @@ pub fn build(b: *std.Build) void {
     c_abi_lib.bundle_compiler_rt = target.result.os.tag == .linux or target.result.os.tag == .macos;
     c_abi_lib.installHeader(b.path("include/zova.h"), "zova.h");
     c_abi_lib.installHeader(b.path("include/zova_plugin.h"), "zova_plugin.h");
-    c_abi_lib.root_module.addOptions("zova_build_options", zova_build_options);
+    addZovaBuildOptions(c_abi_lib.root_module, zova_build_options);
     addEmbeddedSqlite(c_abi_lib.root_module, b, sqlite_c_flags);
     if (sqlite_diagnostics) addSqliteDiagnostics(c_abi_lib.root_module, b);
 
@@ -1091,6 +1102,21 @@ fn addZigTestSuite(
     return suite_step;
 }
 
+/// CWAL's POSIX bindings and production options, set when the build has
+/// `-Dexperimental-cwal`.
+const CwalModules = struct { sys: *std.Build.Module, options: *std.Build.Step.Options };
+var cwal_modules: ?CwalModules = null;
+
+/// Zova's build options, plus CWAL's imports in experimental builds, for a
+/// module that compiles the Zova sources.
+fn addZovaBuildOptions(module: *std.Build.Module, zova_build_options: *std.Build.Step.Options) void {
+    module.addOptions("zova_build_options", zova_build_options);
+    if (cwal_modules) |cwal| {
+        module.addImport("cwal_sys", cwal.sys);
+        module.addOptions("cwal_options", cwal.options);
+    }
+}
+
 fn createZigTestModule(
     b: *std.Build,
     root_source: []const u8,
@@ -1105,7 +1131,7 @@ fn createZigTestModule(
         .target = target,
         .optimize = optimize,
     });
-    root_module.addOptions("zova_build_options", zova_build_options);
+    addZovaBuildOptions(root_module, zova_build_options);
     root_module.addOptions("plugin_fixture_options", plugin_fixture_options);
     addSqlite(root_module, b, sqlite_lib);
     return root_module;
