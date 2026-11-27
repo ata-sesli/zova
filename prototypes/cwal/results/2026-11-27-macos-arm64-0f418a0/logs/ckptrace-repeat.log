@@ -1,0 +1,5 @@
+ckptrace-run2.log rc=0 cwal: {'reads': 601, 'mixed': 0, 'broken': 0, 'reopen': 5, 'ckpt_attempts': 23, 'ckpt_denied': 23, 'snapshot_reads': 121, 'seq_retries': 31, 'snapshot_waits': 3, 'ckpt_races': 65, 'ckpt_fallbacks': 65 | RESULT PASS 29s
+ckptrace-run3.log rc=0 cwal: {'reads': 588, 'mixed': 0, 'broken': 0, 'reopen': 4, 'ckpt_attempts': 22, 'ckpt_denied': 22, 'snapshot_reads': 127, 'seq_retries': 34, 'snapshot_waits': 7, 'ckpt_races': 59, 'ckpt_fallbacks': 59 | RESULT PASS 28s
+ckptrace-run4.log rc=0 cwal: {'reads': 565, 'mixed': 0, 'broken': 0, 'reopen': 3, 'ckpt_attempts': 21, 'ckpt_denied': 21, 'snapshot_reads': 125, 'seq_retries': 30, 'snapshot_waits': 6, 'ckpt_races': 57, 'ckpt_fallbacks': 57 | RESULT PASS 27s
+ckptrace-mutated-no-ckpt-validate.log rc=1 cwal: {'reads': 590, 'mixed': 0, 'broken': 0, 'reopen': 4, 'ckpt_attempts': 22, 'ckpt_denied': 22, 'snapshot_reads': 177, 'seq_retries': 44, 'snapshot_waits': 2, 'ckpt_races': 53, 'ckpt_fallbacks': 53 | RESULT FAIL 28s
+CKPTRACE-DONE

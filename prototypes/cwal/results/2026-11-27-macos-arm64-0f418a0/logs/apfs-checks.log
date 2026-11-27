@@ -1,0 +1,37 @@
+/dev/disk5s1 on /Volumes/wipesides (apfs, local, nodev, nosuid, journaled, noowners)
+== flock
+holder EX: other process SH|NB=EWOULDBLOCK EX|NB=EWOULDBLOCK
+holder EX: second open() in the same process SH|NB=EWOULDBLOCK
+holder SH: other process SH|NB=granted EX|NB=EWOULDBLOCK
+EX held, forked child unlocks the inherited fd: other process EX|NB=granted
+two SH holders, one tries SH->EX|NB: EWOULDBLOCK; afterwards a third process EX|NB=EWOULDBLOCK => failed conversion KEPT the shared lock
+EX->SH conversion with a blocked EX waiter: waiter took EX before the conversion returned in 0 of 200 trials
+SH->EX conversion with a blocked EX waiter: waiter took EX before the conversion returned in 0 of 200 trials
+holder EX then SIGKILL: before=EWOULDBLOCK after=granted
+== mmap
+getpagesize=16384
+mmap(4096, MAP_SHARED) of a 4096-byte file: ok
+store through another process's mapping: seen in this mapping=yes, seen by pread=yes (no msync)
+this process's mapped store and pwrite: seen by the other process=yes; pwrite seen in this mapping=yes
+atomic counter, 4 processes x 1000000 increments through separate mappings: 4000000 (expected 4000000)
+== fsync timing (4096-byte overwrite then sync, same file)
+fsync                  200 calls 0.018 s  0.09 ms/call  failures=0
+fcntl(F_BARRIERFSYNC)  200 calls 0.866 s  4.33 ms/call  failures=0
+fcntl(F_FULLFSYNC)     200 calls 0.462 s  2.31 ms/call  failures=0
+== bundled SQLite sync calls
+sqlite 3.53.4, vfs unix
+defaults: fullfsync=0 checkpoint_fullfsync=0 synchronous=2
+-shm size=32768 bytes, getpagesize=16384
+default, synchronous=FULL, 1 commit          fsync=1 F_FULLFSYNC=0 F_BARRIERFSYNC=0
+default, synchronous=FULL, checkpoint        fsync=2 F_FULLFSYNC=0 F_BARRIERFSYNC=0
+default, synchronous=NORMAL, 1 commit        fsync=1 F_FULLFSYNC=0 F_BARRIERFSYNC=0
+default, synchronous=NORMAL, checkpoint      fsync=2 F_FULLFSYNC=0 F_BARRIERFSYNC=0
+fullfsync=1, synchronous=FULL, 1 commit      fsync=0 F_FULLFSYNC=2 F_BARRIERFSYNC=0
+fullfsync=1, synchronous=FULL, checkpoint    fsync=0 F_FULLFSYNC=2 F_BARRIERFSYNC=0
+ckpt_fullfsync=1, sync=FULL, 1 commit        fsync=1 F_FULLFSYNC=1 F_BARRIERFSYNC=0
+ckpt_fullfsync=1, sync=FULL, checkpoint      fsync=0 F_FULLFSYNC=2 F_BARRIERFSYNC=0
+== sqlite3MemoryBarrier in the prototype binary
+_sqlite3MemoryBarrier:
+00000001002307b8	dmb	ish
+00000001002307bc	ret
+APFS-CHECKS-DONE

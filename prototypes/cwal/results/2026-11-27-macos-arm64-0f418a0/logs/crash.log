@@ -1,0 +1,13 @@
+== process crash at every writer event
+  [plain crash] 1/1340 (0s)
+  [plain crash] 822/1340 (5s)
+  [plain crash] 1340/1340 (10s)
+plain: events=1340 runs=1340 failures=135 recoveries={'none': 1205, '-': 135}
+      135  FAIL torn pairs main=# store=#
+  [cwal crash] 1/1678 (0s)
+  [cwal crash] 595/1678 (5s)
+  [cwal crash] 1064/1678 (10s)
+  [cwal crash] 1484/1678 (15s)
+  [cwal crash] 1678/1678 (17s)
+cwal: events=1678 runs=1678 failures=0 recoveries={'none': 1527, 'rollback': 151}
+RESULT PASS
